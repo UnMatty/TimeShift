@@ -1,0 +1,58 @@
+# Сборка и публикация релиза TimeShift для macOS.
+# Триггер: пуш тега v* (например `git tag v0.1.1 && git push origin v0.1.1`)
+# или ручной запуск из вкладки Actions.
+#
+# Приложение распространяется без подписи Apple: при первом запуске —
+# правый клик по TimeShift.app → «Открыть».
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Rust stable + таргеты для универсального бинарника
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Зависимости фронтенда
+        run: npm ci
+
+      - name: Собрать и опубликовать релиз
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # __VERSION__ подставляется из src-tauri/tauri.conf.json
+          tagName: v__VERSION__
+          releaseName: TimeShift v__VERSION__
+          releaseBody: >-
+            Установщик macOS: скачайте `.dmg`, откройте и перетащите
+            TimeShift.app в Applications. Приложение не подписано сертификатом
+            Apple: при первом запуске нажмите на него правым кликом и выберите
+            «Открыть».
+          releaseDraft: false
+          prerelease: false
+          # Универсальный бинарник: работает и на Apple Silicon, и на Intel.
+          args: --target universal-apple-darwin

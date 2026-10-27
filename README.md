@@ -17,6 +17,14 @@
 - **UI:** TypeScript, React, Vite
 - **БД:** PostgreSQL 17 (опционально; без неё приложение работает на WAL)
 
+## Установка
+
+Готовые сборки macOS публикуются в [Releases](https://github.com/UnMatty/TimeShift/releases): скачайте `TimeShift_aarch64.app.dmg` (Apple Silicon) или `TimeShift_x64.app.dmg` (Intel), откройте и перетащите приложение в Applications.
+
+Приложение распространяется без подписи Apple, поэтому при первом запуске macOS может предупредить о неизвестном разработчике: нажмите на `TimeShift.app` правым кликом и выберите «Открыть».
+
+Новый релиз собирается автоматически: workflow `.github/workflows/release.yml` срабатывает на пуш тега `v*` (или вручную из вкладки Actions) и публикует `.dmg` через [tauri-action](https://github.com/tauri-apps/tauri-action).
+
 ## Сборка и запуск
 
 ```bash
