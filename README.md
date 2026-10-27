@@ -19,7 +19,7 @@
 
 ## Установка
 
-Готовые сборки macOS публикуются в [Releases](https://github.com/UnMatty/TimeShift/releases): скачайте `TimeShift_aarch64.app.dmg` (Apple Silicon) или `TimeShift_x64.app.dmg` (Intel), откройте и перетащите приложение в Applications.
+Готовые сборки macOS публикуются в [Releases](https://github.com/UnMatty/TimeShift/releases): скачайте `TimeShift_<версия>_universal.dmg` — универсальный образ и для Apple Silicon, и для Intel. Откройте его и перетащите приложение в Applications.
 
 Приложение распространяется без подписи Apple, поэтому при первом запуске macOS может предупредить о неизвестном разработчике: нажмите на `TimeShift.app` правым кликом и выберите «Открыть».
 
