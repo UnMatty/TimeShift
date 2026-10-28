@@ -71,7 +71,7 @@ fn roundtrip_all_event_variants() {
         CategorySet { session_id, category: Category::Work }.into(),
         ThoughtParked { thought_id, text: "спросить бюджет".into() }.into(),
         ThoughtResolved { thought_id, resolution: ThoughtResolution::TaskDraft }.into(),
-        BreakEvent { kind: BreakKind::Short, action: BreakAction::SkipToLong, banked_min: 5, duration_min: 0 }.into(),
+        BreakEvent { kind: BreakKind::Short, action: BreakAction::SkipToLong, banked_min: 5, duration_min: 0, spend_min: None }.into(),
         ManualSessionAdded {
             session_id,
             started_at: now,

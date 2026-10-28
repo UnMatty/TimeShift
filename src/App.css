@@ -226,6 +226,46 @@ button.danger {
   padding-top: 6px;
 }
 
+/* Кнопка-CTA покрупнее: отдых после помидорки / старт фокуса. */
+.btn-lg {
+  padding: 10px 18px;
+  font-size: 16px;
+}
+
+.rest-block {
+  margin: 10px 0 2px;
+}
+
+.skip-row button {
+  padding: 3px 9px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.focus-start {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+/* --- саммари дня --- */
+
+.summary {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  font-size: 14px;
+}
+
+.summary b {
+  font-variant-numeric: tabular-nums;
+}
+
+.closed-note {
+  color: var(--ok);
+}
+
 /* --- сессии --- */
 
 .sessions {
@@ -270,10 +310,48 @@ button.danger {
   margin-bottom: 3px;
 }
 
+/* Заметка «что сделано» — раскрывается в диалог по клику. */
 .s-note {
+  display: block;
   width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
   padding: 3px 8px;
   font-size: 13px;
+  border-radius: 7px;
+}
+
+.s-note:hover {
+  background: var(--card2);
+  border-color: var(--border);
+}
+
+.s-note.empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.note-dialog {
+  width: 480px;
+}
+
+.note-dialog textarea {
+  width: 100%;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  resize: vertical;
+  outline: none;
+}
+
+.note-dialog textarea:focus {
+  border-color: var(--accent);
+}
+
+.small {
+  font-size: 12px;
 }
 
 .s-cat {

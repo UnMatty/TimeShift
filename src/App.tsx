@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   api,
+  breakIcon,
+  BREAK_KIND_LABEL,
   CATEGORY_LABEL,
   isCmdError,
   PAUSE_REASON_LABEL,
@@ -23,21 +25,24 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   // Вопрос о разрыве (FR-4): ждёт ответа «где был?» перед стартом этапа.
-  const [gap, setGap] = useState<{ minutes: number; run: (reason: string) => void } | null>(null);
+  const [gap, setGap] = useState<{
+    minutes: number;
+    run: (reason: string, asRest: boolean) => void;
+  } | null>(null);
 
   // Операция — функция от причины разрыва: при GapNeeded она вызовется повторно.
-  const run = useCallback(async (fn: (gapReason?: string) => Promise<Snapshot>) => {
+  const run = useCallback(async (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => {
     try {
-      setSnap(await fn(undefined));
+      setSnap(await fn(undefined, false));
       setError(null);
     } catch (e) {
       if (isCmdError(e)) {
         if (e.kind === "gap_needed") {
           setGap({
             minutes: e.minutes,
-            run: (reason) => {
+            run: (reason, asRest) => {
               setGap(null);
-              void run(() => fn(reason));
+              void run(() => fn(reason, asRest));
             },
           });
         } else {
@@ -87,7 +92,13 @@ export default function App() {
         </div>
       )}
 
-      {gap && <GapDialog minutes={gap.minutes} onAnswer={(r) => gap.run(r)} />}
+      {gap && (
+        <GapDialog
+          minutes={gap.minutes}
+          bankMin={snap.bank_min}
+          onAnswer={(reason, asRest) => gap.run(reason, asRest)}
+        />
+      )}
 
       {tab === "day" && <DayTab snap={snap} run={run} />}
       {tab === "parking" && <ParkingTab snap={snap} run={run} />}
@@ -112,9 +123,19 @@ function DbStatus() {
   );
 }
 
-function GapDialog({ minutes, onAnswer }: { minutes: number; onAnswer: (reason: string) => void }) {
+function GapDialog({
+  minutes,
+  bankMin,
+  onAnswer,
+}: {
+  minutes: number;
+  bankMin: number;
+  onAnswer: (reason: string, asRest: boolean) => void;
+}) {
   const [reason, setReason] = useState("обед");
   const [other, setOther] = useState("");
+  const restMin = Math.min(minutes, bankMin);
+  const answer = (asRest: boolean) => onAnswer(other.trim() || reason, asRest);
   return (
     <div className="overlay">
       <div className="dialog">
@@ -133,10 +154,16 @@ function GapDialog({ minutes, onAnswer }: { minutes: number; onAnswer: (reason: 
           onChange={(e) => setOther(e.currentTarget.value)}
         />
         <div className="row">
-          <button className="primary" onClick={() => onAnswer(other.trim() || reason)}>
+          <button className="primary" onClick={() => answer(false)}>
             Записать разрыв
           </button>
+          {restMin > 0 && (
+            <button onClick={() => answer(true)}>☕ Это был отдых — зачесть {restMin} мин из банка</button>
+          )}
         </div>
+        {restMin > 0 && restMin < minutes && (
+          <p className="muted small">Банк покроет {restMin} мин, остаток запишется разрывом.</p>
+        )}
       </div>
     </div>
   );
@@ -151,77 +178,190 @@ function DayTab({
   run,
 }: {
   snap: Snapshot;
-  run: (fn: (gapReason?: string) => Promise<Snapshot>) => Promise<void>;
+  run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void>;
 }) {
   return (
     <>
+      <SummaryCard snap={snap} />
       <PhaseCard snap={snap} run={run} />
       <SessionsCard snap={snap} run={run} />
       <ManualCard run={run} />
       <footer className="day-footer">
-        <button onClick={() => void run(() => api.closeDay())}>🌙 Завершить день (сжечь банк отдыха)</button>
+        {snap.day_closed ? (
+          <span className="closed-note">
+            ✅ День закрыт — несписанный отдых ({snap.bank_min} мин) сгорел. Новый день начнётся сам.
+          </span>
+        ) : (
+          <button onClick={() => void run(() => api.closeDay())}>🌙 Завершить день (сжечь банк отдыха)</button>
+        )}
       </footer>
     </>
   );
 }
 
-function PhaseCard({ snap, run }: { snap: Snapshot; run: (fn: (gapReason?: string) => Promise<Snapshot>) => Promise<void> }) {
+/// Итоги дня одним взглядом: завершённые сессии, чистый фокус, отдых, банк.
+function SummaryCard({ snap }: { snap: Snapshot }) {
+  const done = snap.sessions.filter((s) => s.status === "completed" || s.status === "partial");
+  const focusMin = done.reduce((a, s) => a + (s.actual_min ?? 0), 0);
+  const restMin = snap.breaks.filter((b) => b.action === "taken").reduce((a, b) => a + b.duration_min, 0);
+  return (
+    <section className="card summary">
+      <span>
+        🍅 <b>{done.length}</b>
+      </span>
+      <span>
+        фокус <b>{focusMin}</b> мин
+      </span>
+      <span>
+        отдых <b>{restMin}</b> мин
+      </span>
+      <span>
+        банк <b>{snap.bank_min}</b> мин
+      </span>
+      {snap.gaps.length > 0 && (
+        <span>
+          разрывов <b>{snap.gaps.length}</b>
+        </span>
+      )}
+    </section>
+  );
+}
+
+function PhaseCard({
+  snap,
+  run,
+}: {
+  snap: Snapshot;
+  run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void>;
+}) {
   const [label, setLabel] = useState("");
   const [confidential, setConfidential] = useState(false);
+  const [category, setCategory] = useState<Category | null>(null);
   const [pauseReason, setPauseReason] = useState<PauseReason>("internal");
+  // Подтверждение «старт фокуса без отдыха», когда перерыв ещё не взят.
+  const [confirmSkip, setConfirmSkip] = useState(false);
 
   const phase = snap.phase;
   const proposed = snap.proposed_break;
+  const bank = snap.bank_min;
+
+  const takeBreak = () => void run((gr, asRest) => api.startBreak(gr ?? null, asRest ?? false));
+  const takeBankBreak = () => void run((gr, asRest) => api.startBankBreak(gr ?? null, asRest ?? false));
+  const startFocus = () =>
+    void run((gr, asRest) => api.startFocus(label || null, confidential, gr ?? null, asRest ?? false, category));
+  // Скип предложенного перерыва в банк и сразу старт фокуса.
+  const skipAndStartFocus = () =>
+    void run(async (gr, asRest) => {
+      await api.skipBreak(proposed?.kind === "long" ? "skip_to_long" : "skip_to_short");
+      return api.startFocus(label || null, confidential, gr ?? null, asRest ?? false, category);
+    });
+
+  // Блок «над чем работаешь»: подпись, категория, конфиденциальность, старт.
+  const focusStart = (primary: boolean) => (
+    <div className="row focus-start">
+      <input
+        className="grow"
+        placeholder="над чем работаешь (необязательно)"
+        value={label}
+        onChange={(e) => setLabel(e.currentTarget.value)}
+      />
+      <div className="chips">
+        {(Object.keys(CATEGORY_LABEL) as Category[]).map((k) => (
+          <button
+            key={k}
+            className={category === k ? "chip active" : "chip"}
+            onClick={() => setCategory(category === k ? null : k)}
+          >
+            {CATEGORY_LABEL[k]}
+          </button>
+        ))}
+      </div>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={confidential}
+          onChange={(e) => setConfidential(e.currentTarget.checked)}
+        />
+        конфиденциально
+      </label>
+      <button
+        className={primary ? "primary btn-lg" : ""}
+        onClick={() => (proposed ? setConfirmSkip(true) : startFocus())}
+      >
+        🍅 Старт фокуса
+      </button>
+    </div>
+  );
 
   return (
     <section className="card phase-card">
+      {confirmSkip && proposed && (
+        <div className="overlay">
+          <div className="dialog">
+            <h3>Перерыв {proposed.duration_min} мин не взят</h3>
+            <p>
+              Начать помидорку без отдыха? Пропущенные минуты уйдут в банк — он станет {bank + proposed.duration_min}{" "}
+              мин и сгорит при закрытии дня.
+            </p>
+            <div className="row">
+              <button className="primary" onClick={skipAndStartFocus}>
+                ⏭ Скипнуть в банк и начать фокус
+              </button>
+              <button
+                onClick={() => {
+                  setConfirmSkip(false);
+                  takeBreak();
+                }}
+              >
+                ☕ Всё-таки отдохнуть
+              </button>
+              <button onClick={() => setConfirmSkip(false)}>Отмена</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {phase.kind === "idle" && (
         <div className="phase idle">
           <div className="big">◦</div>
           <div className="phase-info">
             <h2>Свободен</h2>
             <p className="muted">
-              Стрик: {snap.streak} 🍅 · Банк отдыха: {snap.bank_min} мин
+              Стрик: {snap.streak} 🍅 · Банк отдыха: {bank} мин
               {snap.gaps.length > 0 && <> · Разрывов записано: {snap.gaps.length}</>}
             </p>
-            <div className="row">
-              <input
-                className="grow"
-                placeholder="над чем работаешь (необязательно)"
-                value={label}
-                onChange={(e) => setLabel(e.currentTarget.value)}
-              />
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={confidential}
-                  onChange={(e) => setConfidential(e.currentTarget.checked)}
-                />
-                конфиденциально
-              </label>
-              <button
-                className="primary"
-                onClick={() => void run((gr) => api.startFocus(label || null, confidential, gr ?? null))}
-              >
-                🍅 Старт фокуса
-              </button>
-            </div>
-            {proposed && (
-              <div className="row break-proposal">
-                <span>
-                  Предложен {proposed.kind === "long" ? "длинный" : "короткий"} перерыв:{" "}
-                  <b>{proposed.duration_min} мин</b>
-                </span>
-                <button onClick={() => void run((gr) => api.startBreak(gr ?? null))}>☕ Взять перерыв</button>
-                <button onClick={() => void run(() => api.skipBreak("skip_to_short"))}>
-                  ⏭ скип → в короткий
-                </button>
-                <button onClick={() => void run(() => api.skipBreak("skip_to_long"))}>
-                  ⏭ скип → в длинный
-                </button>
-                <button onClick={() => void run(() => api.skipBreak("skip_plain"))}>⏭ просто скип</button>
+
+            {proposed ? (
+              // Отдых — ожидаемое действие после помидорки: первичная кнопка.
+              <div className="rest-block">
+                <div className="row">
+                  <button className="primary btn-lg" onClick={takeBreak}>
+                    {breakIcon(proposed.kind)} {BREAK_KIND_LABEL[proposed.kind]} — {proposed.duration_min} мин
+                  </button>
+                  {bank > 0 && (
+                    <button className="btn-lg" onClick={takeBankBreak}>
+                      🛌 Весь банк ({bank} мин)
+                    </button>
+                  )}
+                </div>
+                <div className="row skip-row">
+                  <span className="muted small">Не отдыхать:</span>
+                  <button onClick={() => void run(() => api.skipBreak("skip_to_short"))}>⏭ в короткий</button>
+                  <button onClick={() => void run(() => api.skipBreak("skip_to_long"))}>⏭ в длинный</button>
+                  <button onClick={() => void run(() => api.skipBreak("skip_plain"))}>⏭ просто скип</button>
+                </div>
               </div>
+            ) : (
+              bank > 0 && (
+                <div className="row rest-block">
+                  <button className="btn-lg" onClick={takeBankBreak}>
+                    🛌 Отдохнуть весь банк ({bank} мин)
+                  </button>
+                </div>
+              )
             )}
+
+            {focusStart(!proposed)}
           </div>
         </div>
       )}
@@ -259,7 +399,9 @@ function PhaseCard({ snap, run }: { snap: Snapshot; run: (fn: (gapReason?: strin
             ) : (
               <div className="row">
                 <button onClick={() => void run(() => api.pauseFocus())}>⏸ Пауза</button>
-                <button onClick={() => void run(() => api.completeFocus())}>✅ Завершить сейчас</button>
+                <button className="primary" onClick={() => void run(() => api.completeFocus())}>
+                  ✅ Завершить сейчас
+                </button>
                 <button className="danger" onClick={() => void run(() => api.voidSession(null))}>
                   🚫 Аннулировать
                 </button>
@@ -271,15 +413,13 @@ function PhaseCard({ snap, run }: { snap: Snapshot; run: (fn: (gapReason?: strin
 
       {phase.kind === "break" && (
         <div className="phase break">
-          <div className="big">{phase.break_kind === "long" ? "☕" : "💬"}</div>
+          <div className="big">{breakIcon(phase.break_kind)}</div>
           <div className="phase-info">
             <h2>
               {fmtClock(phase.remaining_secs)}
               <span className="muted"> / {phase.duration_min}:00</span>
             </h2>
-            <p className="muted">
-              {phase.break_kind === "long" ? "Длинный" : "Короткий"} перерыв — отойди от экрана
-            </p>
+            <p className="muted">{BREAK_KIND_LABEL[phase.break_kind]} — отойди от экрана</p>
             <div className="row">
               <button className="primary" onClick={() => void run(() => api.endBreak())}>
                 ⏹ Закончить перерыв
@@ -305,7 +445,7 @@ function SessionsCard({
   run,
 }: {
   snap: Snapshot;
-  run: (fn: (gapReason?: string) => Promise<Snapshot>) => Promise<void>;
+  run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void>;
 }) {
   const sessions = [...snap.sessions].sort((a, b) => a.started_at.localeCompare(b.started_at));
   return (
@@ -326,10 +466,9 @@ function SessionRow({
   run,
 }: {
   s: UiSession;
-  run: (fn: (gapReason?: string) => Promise<Snapshot>) => Promise<void>;
+  run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void>;
 }) {
-  const [note, setNote] = useState(s.note);
-  useEffect(() => setNote(s.note), [s.note]);
+  const [noteOpen, setNoteOpen] = useState(false);
   const time = `${fmtTime(s.started_at)}${s.ended_at ? `–${fmtTime(s.ended_at)}` : "…"}`;
   return (
     <div className={`session ${STATUS_CLASS[s.status]}`}>
@@ -353,18 +492,9 @@ function SessionRow({
             </span>
           )}
         </div>
-        <input
-          className="s-note"
-          placeholder="что сделано (FR-8)"
-          value={note}
-          onChange={(e) => setNote(e.currentTarget.value)}
-          onBlur={() => {
-            if (note !== s.note) void run(() => api.setNote(s.id, note));
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
-          }}
-        />
+        <button className={s.note ? "s-note" : "s-note empty"} onClick={() => setNoteOpen(true)}>
+          {s.note || "＋ что сделано"}
+        </button>
       </div>
       <select
         className="s-cat"
@@ -383,11 +513,66 @@ function SessionRow({
           </option>
         ))}
       </select>
+      {noteOpen && (
+        <NoteDialog
+          title={`${time} · ${s.label || "без подписи"}`}
+          initial={s.note}
+          onClose={() => setNoteOpen(false)}
+          onSave={(note) => {
+            setNoteOpen(false);
+            if (note !== s.note) void run(() => api.setNote(s.id, note));
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function ManualCard({ run }: { run: (fn: (gapReason?: string) => Promise<Snapshot>) => Promise<void> }) {
+/// Большое поле «что сделано» (FR-8): заметка пишется в раскрытом окне,
+/// а не в однострочном инпуте. Cmd+Enter — сохранить, Esc — закрыть.
+function NoteDialog({
+  title,
+  initial,
+  onClose,
+  onSave,
+}: {
+  title: string;
+  initial: string;
+  onClose: () => void;
+  onSave: (note: string) => void;
+}) {
+  const [text, setText] = useState(initial);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => ref.current?.focus(), []);
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="dialog note-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Что сделано</h3>
+        <p>{title}</p>
+        <textarea
+          ref={ref}
+          rows={6}
+          placeholder="результат помидорки — своими словами"
+          value={text}
+          onChange={(e) => setText(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onSave(text.trim());
+            if (e.key === "Escape") onClose();
+          }}
+        />
+        <div className="row">
+          <button className="primary" onClick={() => onSave(text.trim())}>
+            Сохранить
+          </button>
+          <button onClick={onClose}>Отмена</button>
+          <span className="muted small">Cmd+Enter — сохранить, Esc — закрыть</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManualCard({ run }: { run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void> }) {
   const [time, setTime] = useState("");
   const [minutes, setMinutes] = useState(25);
   const [label, setLabel] = useState("");
@@ -440,7 +625,7 @@ function ManualCard({ run }: { run: (fn: (gapReason?: string) => Promise<Snapsho
 // Парковка
 // ---------------------------------------------------------------------------
 
-function ParkingTab({ snap, run }: { snap: Snapshot; run: (fn: (gapReason?: string) => Promise<Snapshot>) => Promise<void> }) {
+function ParkingTab({ snap, run }: { snap: Snapshot; run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void> }) {
   const [text, setText] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => inputRef.current?.focus(), []);

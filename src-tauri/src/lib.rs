@@ -70,6 +70,7 @@ pub fn run() {
             commands::complete_focus,
             commands::void_session,
             commands::start_break,
+            commands::start_bank_break,
             commands::skip_break,
             commands::end_break,
             commands::park_thought,
@@ -137,6 +138,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let complete = item("complete", "✅ Завершить помидорку")?;
     let void_item = item("void", "🚫 Аннулировать помидорку")?;
     let start_break = item("start_break", "☕ Старт перерыва")?;
+    let bank_break = item("bank_break", "🛌 Отдохнуть весь банк")?;
     let end_break = item("end_break", "⏹ Закончить перерыв")?;
     let skip_short = item("skip_short", "прибавить к следующему короткому")?;
     let skip_long = item("skip_long", "прибавить к следующему длинному")?;
@@ -157,6 +159,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             &void_item,
             &PredefinedMenuItem::separator(app)?,
             &start_break,
+            &bank_break,
             &end_break,
             &skip,
             &PredefinedMenuItem::separator(app)?,
@@ -183,7 +186,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn on_tray_event(app: &AppHandle, id: &str) {
     match id {
         "start_focus" => {
-            commands::start_focus(app.clone(), None, false, None).ok();
+            commands::start_focus(app.clone(), None, false, None, false, None).ok();
         }
         "pause" => {
             commands::pause_focus(app.clone()).ok();
@@ -199,7 +202,10 @@ fn on_tray_event(app: &AppHandle, id: &str) {
             commands::void_session(app.clone(), Some("аннулировано из трея".into())).ok();
         }
         "start_break" => {
-            commands::start_break(app.clone(), None).ok();
+            commands::start_break(app.clone(), None, false).ok();
+        }
+        "bank_break" => {
+            commands::start_bank_break(app.clone(), None, false).ok();
         }
         "end_break" => {
             commands::end_break(app.clone()).ok();

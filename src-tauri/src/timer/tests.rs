@@ -28,7 +28,7 @@ fn full_day_cycle() {
     let mut t = timer();
     let base = ts_at(2026, 10, 27, 9, 0);
 
-    let events = t.op_start_focus(base, Some("отчёты".into()), false, None).unwrap();
+    let events = t.op_start_focus(base, Some("отчёты".into()), false, None, false, None).unwrap();
     apply(&mut t, base, events);
     assert!(matches!(t.phase, Phase::Focus(_)));
 
@@ -59,7 +59,7 @@ fn full_day_cycle() {
     // Предложен короткий перерыв 5 мин; берём.
     let proposed = t.proposed_break().expect("перерыв предложен");
     assert_eq!(proposed.kind, BreakKind::Short);
-    let events = t.op_start_break(done_at, None).unwrap();
+    let events = t.op_start_break(done_at, None, false).unwrap();
     apply(&mut t, done_at, events);
     let Phase::Break(b) = &t.phase else { panic!("должен быть перерыв") };
     assert_eq!(b.duration_min, 5);
@@ -67,7 +67,7 @@ fn full_day_cycle() {
     // Вторая помидорка, после неё скип короткого в длинный: банк = 5.
     t.op_end_break(done_at).expect("закончить перерыв");
     let f2 = done_at + chrono::Duration::minutes(1);
-    let events = t.op_start_focus(f2, None, false, None).unwrap();
+    let events = t.op_start_focus(f2, None, false, None, false, None).unwrap();
     apply(&mut t, f2, events);
     let done2 = f2 + chrono::Duration::minutes(25);
     let events = t.tick(done2);
@@ -79,8 +79,8 @@ fn full_day_cycle() {
 
     // Разрыв > порога при старте третьей: сначала вопрос, потом лог.
     let later = done2 + chrono::Duration::minutes(30);
-    assert!(matches!(t.op_start_focus(later, None, false, None), Err(OpError::NeedGap { minutes: 30 })));
-    let events = t.op_start_focus(later, None, false, Some("обед".into())).unwrap();
+    assert!(matches!(t.op_start_focus(later, None, false, None, false, None), Err(OpError::NeedGap { minutes: 30 })));
+    let events = t.op_start_focus(later, None, false, Some("обед".into()), false, None).unwrap();
     apply(&mut t, later, events);
     assert_eq!(t.gaps.len(), 1);
     assert_eq!(t.gaps[0].reason, "обед");
@@ -148,13 +148,13 @@ fn skip_bank_accumulates_burns_on_day_close() {
     // Четыре помидорки по 25 мин с короткими перерывами — до стрика 4.
     let mut now = base;
     for i in 0..4 {
-        let events = t.op_start_focus(now, None, false, None).unwrap();
+        let events = t.op_start_focus(now, None, false, None, false, None).unwrap();
         apply(&mut t, now, events);
         now += chrono::Duration::minutes(25);
         let events = t.tick(now);
         apply(&mut t, now, events);
         if i < 3 {
-            let events = t.op_start_break(now, None).unwrap();
+            let events = t.op_start_break(now, None, false).unwrap();
             apply(&mut t, now, events);
             now += chrono::Duration::minutes(5);
             t.op_end_break(now).expect("закончить перерыв");
@@ -172,7 +172,7 @@ fn skip_bank_accumulates_burns_on_day_close() {
     // Ещё помидорка (через 5 минут — не попадая в порог разрыва);
     // предложен короткий 5+15=20; берём — банк потреблён.
     now += chrono::Duration::minutes(5);
-    let events = t.op_start_focus(now, None, false, None).unwrap();
+    let events = t.op_start_focus(now, None, false, None, false, None).unwrap();
     apply(&mut t, now, events);
     now += chrono::Duration::minutes(25);
     let events = t.tick(now);
@@ -180,7 +180,7 @@ fn skip_bank_accumulates_burns_on_day_close() {
     let proposed = t.proposed_break().unwrap();
     assert_eq!(proposed.kind, BreakKind::Short);
     assert_eq!(proposed.duration_min, 20, "5 базовых + 15 из банка");
-    let events = t.op_start_break(now, None).unwrap();
+    let events = t.op_start_break(now, None, false).unwrap();
     apply(&mut t, now, events);
     assert_eq!(t.bank_min(), 0);
 
@@ -198,7 +198,7 @@ fn skip_bank_accumulates_burns_on_day_close() {
 fn plain_skip_and_burn() {
     let base = ts_at(2026, 10, 27, 9, 0);
     let mut t = timer();
-    let events = t.op_start_focus(base, None, false, None).unwrap();
+    let events = t.op_start_focus(base, None, false, None, false, None).unwrap();
     apply(&mut t, base, events);
     let done = base + chrono::Duration::minutes(25);
     let events = t.tick(done);
@@ -208,7 +208,7 @@ fn plain_skip_and_burn() {
     assert_eq!(t.bank_min(), 0);
 
     // Скопим банк и закроем день.
-    let events = t.op_start_focus(done, None, false, None).unwrap();
+    let events = t.op_start_focus(done, None, false, None, false, None).unwrap();
     apply(&mut t, done, events);
     let done2 = done + chrono::Duration::minutes(25);
     let events = t.tick(done2);
@@ -229,7 +229,7 @@ fn void_manual_note_category() {
     let base = ts_at(2026, 10, 27, 14, 0);
     let mut t = timer();
 
-    let events = t.op_start_focus(base, Some("мусорная".into()), false, None).unwrap();
+    let events = t.op_start_focus(base, Some("мусорная".into()), false, None, false, None).unwrap();
     apply(&mut t, base, events);
     let voided = base + chrono::Duration::minutes(5);
     let events = t.op_void_focus(Some("сгорела: позвонили".into())).unwrap();
@@ -263,7 +263,10 @@ fn void_manual_note_category() {
 fn day_rollover_burns_bank() {
     let base = ts_at(2026, 10, 27, 23, 50);
     let mut t = timer();
-    let events = t.op_start_focus(base, None, false, None).unwrap();
+    // Таймер создаётся с реальной сегодняшней датой — тесты кочуют по дням,
+    // поэтому фиксируем дату начала вручную.
+    t.current_date = base.date_naive();
+    let events = t.op_start_focus(base, None, false, None, false, None).unwrap();
     apply(&mut t, base, events);
     let done = base + chrono::Duration::minutes(9); // 23:59, отработано только 9 мин
     let events = t.op_complete_focus(done).unwrap();
@@ -283,4 +286,145 @@ fn day_rollover_burns_bank() {
 
     // Повторный тик в тот же день — ничего.
     assert!(t.tick_day_rollover(midnight + chrono::Duration::minutes(1)).is_empty());
+}
+
+/// «Отдохнуть весь банк» (v0.1.1): перерыв длительностью в банк, банк обнулён;
+/// при пустом банке операция запрещена.
+#[test]
+fn bank_break_spends_whole_bank() {
+    let base = ts_at(2026, 10, 28, 9, 0);
+    let mut t = timer();
+    assert!(t.op_start_bank_break(base, None, false).is_err(), "пустой банк");
+
+    // Помидорка + скип короткого в банк = 5.
+    let events = t.op_start_focus(base, None, false, None, false, None).unwrap();
+    apply(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply(&mut t, done, events);
+    let events = t.op_skip_break(BreakAction::SkipToShort).unwrap();
+    apply(&mut t, done, events);
+    assert_eq!(t.bank_min(), 5);
+
+    // Ещё помидорка + скип: банк 10; берём весь.
+    let f2 = done + chrono::Duration::minutes(5);
+    let events = t.op_start_focus(f2, None, false, None, false, None).unwrap();
+    apply(&mut t, f2, events);
+    let done2 = f2 + chrono::Duration::minutes(25);
+    let events = t.tick(done2);
+    apply(&mut t, done2, events);
+    let events = t.op_skip_break(BreakAction::SkipToShort).unwrap();
+    apply(&mut t, done2, events);
+    assert_eq!(t.bank_min(), 10);
+
+    let events = t.op_start_bank_break(done2, None, false).unwrap();
+    let Event::BreakEvent(b) = &events[0] else { panic!() };
+    assert_eq!(b.kind, BreakKind::Bank);
+    assert_eq!(b.duration_min, 10);
+    apply(&mut t, done2, events);
+    assert_eq!(t.bank_min(), 0);
+    let Phase::Break(bp) = &t.phase else { panic!("должен идти перерыв") };
+    assert_eq!(bp.duration_min, 10);
+}
+
+/// «Это был отдых» (v0.1.1): минуты разрыва списываются из банка, остаток
+/// сверх банка — обычный разрыв; при пустом банке — просто разрыв.
+#[test]
+fn gap_as_rest_spends_bank_and_logs_remainder() {
+    let base = ts_at(2026, 10, 28, 9, 0);
+    let mut t = timer();
+    let events = t.op_start_focus(base, None, false, None, false, None).unwrap();
+    apply(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply(&mut t, done, events);
+    let events = t.op_skip_break(BreakAction::SkipToShort).unwrap();
+    apply(&mut t, done, events);
+    assert_eq!(t.bank_min(), 5);
+
+    // Разрыв 30 мин при банке 5: 5 мин — отдых, 25 — обычный разрыв.
+    let later = done + chrono::Duration::minutes(30);
+    let events = t
+        .op_start_focus(later, None, false, Some("обед".into()), true, None)
+        .unwrap();
+    assert_eq!(events.len(), 3, "отдых + разрыв + старт фокуса");
+    let Event::BreakEvent(b) = &events[0] else { panic!() };
+    assert_eq!(b.spend_min, Some(5));
+    assert_eq!(b.duration_min, 5);
+    let Event::GapLogged(g) = &events[1] else { panic!() };
+    assert_eq!((g.ended_at - g.started_at).num_minutes(), 25);
+    apply(&mut t, later, events);
+
+    assert_eq!(t.bank_min(), 0);
+    assert_eq!(t.gaps.len(), 1);
+    assert!(matches!(t.phase, Phase::Focus(_)));
+    assert_eq!(t.breaks.last().map(|b| b.duration_min), Some(5));
+
+    // Пустой банк: «это был отдых» вырождается в обычный разрыв.
+    let done2 = later + chrono::Duration::minutes(25);
+    let events = t.tick(done2);
+    apply(&mut t, done2, events);
+    let even_later = done2 + chrono::Duration::minutes(20);
+    let events = t.op_start_break(even_later, Some("потерял ритм".into()), true).unwrap();
+    apply(&mut t, even_later, events);
+    assert_eq!(t.gaps.len(), 2, "без банка отдых не списывается");
+}
+
+/// Повторное «Завершить день» запрещено; после смены суток — снова можно.
+#[test]
+fn day_close_is_once_per_day() {
+    let base = ts_at(2026, 10, 28, 9, 0);
+    let mut t = timer();
+    let events = t.op_start_focus(base, None, false, None, false, None).unwrap();
+    apply(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply(&mut t, done, events);
+
+    let closed = done + chrono::Duration::minutes(6);
+    let events = t.op_close_day().unwrap();
+    apply(&mut t, closed, events);
+    assert!(t.day_closed);
+    assert!(t.snapshot(closed).day_closed);
+    assert!(t.op_close_day().is_err(), "день уже закрыт");
+
+    // Полночь: день закрыт и банк пуст — rollover просто открывает новый день.
+    let midnight = ts_at(2026, 10, 29, 0, 0);
+    assert!(t.tick_day_rollover(midnight).is_empty(), "событие не нужно");
+    assert!(!t.day_closed, "новый день открыт");
+
+    // Помидорка нового дня: через ночь — большой разрыв, логируем причиной.
+    let next = ts_at(2026, 10, 29, 9, 0);
+    let events = t.op_start_focus(next, None, false, Some("ночь".into()), false, None).unwrap();
+    apply(&mut t, next, events);
+    let s = t.snapshot(next);
+    assert!(!s.day_closed);
+
+    // Помидорка завершается — и день снова можно закрыть.
+    let done3 = next + chrono::Duration::minutes(25);
+    let events = t.tick(done3);
+    apply(&mut t, done3, events);
+    assert!(t.op_close_day().is_ok(), "новый день закрывается");
+
+    // Событие третьего дня при проигрывании журнала тоже сбрасывает флаг.
+    let third = ts_at(2026, 10, 30, 12, 0);
+    apply(
+        &mut t,
+        third,
+        vec![ThoughtParked { thought_id: Uuid::new_v4(), text: "мысль".into() }.into()],
+    );
+    assert!(!t.day_closed, "fold сбрасывает закрытие при смене суток");
+}
+
+/// Категория, выбранная при старте, попадает в сессию сразу.
+#[test]
+fn category_at_start() {
+    let base = ts_at(2026, 10, 28, 9, 0);
+    let mut t = timer();
+    let events = t
+        .op_start_focus(base, Some("созвон".into()), false, None, false, Some(Category::Meeting))
+        .unwrap();
+    assert!(events.iter().any(|e| matches!(e, Event::CategorySet(_))), "категория — событием");
+    apply(&mut t, base, events);
+    assert_eq!(t.sessions[0].category, Some(Category::Meeting));
 }

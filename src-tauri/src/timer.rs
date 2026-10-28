@@ -123,6 +123,7 @@ pub struct Snapshot {
     pub bank_min: i64,
     pub streak: u32,
     pub day: NaiveDate,
+    pub day_closed: bool,
     pub sessions: Vec<UiSession>,
     pub gaps: Vec<UiGap>,
     pub thoughts: Vec<UiThought>,
@@ -167,6 +168,8 @@ pub struct Timer {
     pub streak: u32,
     pub last_stage_end: Option<DateTime<Local>>,
     pub current_date: NaiveDate,
+    /// День закрыт кнопкой «Завершить день» (до полуночи повторно не закрывается).
+    pub day_closed: bool,
     pub sessions: Vec<UiSession>,
     pub gaps: Vec<UiGap>,
     pub thoughts: Vec<UiThought>,
@@ -183,6 +186,7 @@ impl Timer {
             streak: 0,
             last_stage_end: None,
             current_date: Local::now().date_naive(),
+            day_closed: false,
             sessions: Vec::new(),
             gaps: Vec::new(),
             thoughts: Vec::new(),
@@ -208,6 +212,8 @@ impl Timer {
         let extra = match kind {
             BreakKind::Short => self.short_extra_min,
             BreakKind::Long => self.long_extra_min,
+            // «Весь банк» не предлагается сам — только по явной команде.
+            BreakKind::Bank => 0,
         };
         Some(ProposedBreak { kind, duration_min: base + extra })
     }
@@ -244,6 +250,7 @@ impl Timer {
             bank_min: self.bank_min(),
             streak: self.streak,
             day: self.current_date,
+            day_closed: self.day_closed,
             sessions: self.sessions.clone(),
             gaps: self.gaps.clone(),
             thoughts: self.thoughts.clone(),
@@ -266,39 +273,53 @@ impl Timer {
 
     /// Старт фокуса (PRD FR-2 — вручную). Если между этапами большой разрыв и
     /// причина не передана — `NeedGap` (FR-4), команда вернёт её в UI.
+    /// `gap_as_rest` — ответ «это был отдых»: минуты разрыва списываются из банка,
+    /// остаток сверх банка логируется обычным разрывом. `category` — тип фокуса,
+    /// выбранный до старта (v0.1.1).
     pub fn op_start_focus(
         &self,
         now: DateTime<Local>,
         label: Option<String>,
         confidential: bool,
         gap_reason: Option<String>,
+        gap_as_rest: bool,
+        category: Option<Category>,
     ) -> Result<Vec<Event>, OpError> {
         if !matches!(self.phase, Phase::Idle) {
             return Err(OpError::InvalidState("этап уже идёт".into()));
         }
         let mut events = Vec::new();
         if let Some(gap) = self.detect_gap(now, gap_reason)? {
-            events.push(GapLogged { started_at: gap.0, ended_at: gap.1, reason: gap.2 }.into());
+            events.extend(self.gap_events(gap, gap_as_rest));
         }
+        let session_id = Uuid::new_v4();
         events.push(SessionStarted {
-            session_id: Uuid::new_v4(),
+            session_id,
             planned_min: self.cfg.focus_min,
             source: SessionSource::Timer,
             label: label.filter(|l| !l.trim().is_empty()),
             confidential,
         }
         .into());
+        if let Some(category) = category {
+            events.push(CategorySet { session_id, category }.into());
+        }
         Ok(events)
     }
 
     /// Старт предложенного перерыва (короткий/длинный по стрику, с банком).
-    pub fn op_start_break(&self, now: DateTime<Local>, gap_reason: Option<String>) -> Result<Vec<Event>, OpError> {
+    pub fn op_start_break(
+        &self,
+        now: DateTime<Local>,
+        gap_reason: Option<String>,
+        gap_as_rest: bool,
+    ) -> Result<Vec<Event>, OpError> {
         if !matches!(self.phase, Phase::Idle) {
             return Err(OpError::InvalidState("этап уже идёт".into()));
         }
         let mut events = Vec::new();
         if let Some(gap) = self.detect_gap(now, gap_reason)? {
-            events.push(GapLogged { started_at: gap.0, ended_at: gap.1, reason: gap.2 }.into());
+            events.extend(self.gap_events(gap, gap_as_rest));
         }
         let proposed = self
             .proposed_break()
@@ -307,6 +328,7 @@ impl Timer {
             - match proposed.kind {
                 BreakKind::Short => self.short_extra_min,
                 BreakKind::Long => self.long_extra_min,
+                BreakKind::Bank => self.bank_min(),
             };
         events.push(
             BreakEvent {
@@ -314,6 +336,39 @@ impl Timer {
                 action: BreakAction::Taken,
                 banked_min: banked_after,
                 duration_min: proposed.duration_min,
+                spend_min: None,
+            }
+            .into(),
+        );
+        Ok(events)
+    }
+
+    /// «Отдохнуть весь банк» (v0.1.1): перерыв длительностью во весь накопленный
+    /// отдых; банк обнуляется.
+    pub fn op_start_bank_break(
+        &self,
+        now: DateTime<Local>,
+        gap_reason: Option<String>,
+        gap_as_rest: bool,
+    ) -> Result<Vec<Event>, OpError> {
+        if !matches!(self.phase, Phase::Idle) {
+            return Err(OpError::InvalidState("этап уже идёт".into()));
+        }
+        let bank = self.bank_min();
+        if bank <= 0 {
+            return Err(OpError::InvalidState("банк отдыха пуст".into()));
+        }
+        let mut events = Vec::new();
+        if let Some(gap) = self.detect_gap(now, gap_reason)? {
+            events.extend(self.gap_events(gap, gap_as_rest));
+        }
+        events.push(
+            BreakEvent {
+                kind: BreakKind::Bank,
+                action: BreakAction::Taken,
+                banked_min: 0,
+                duration_min: bank,
+                spend_min: None,
             }
             .into(),
         );
@@ -331,6 +386,7 @@ impl Timer {
         let offered_base = match proposed.kind {
             BreakKind::Short => self.cfg.short_break_min,
             BreakKind::Long => self.cfg.long_break_min,
+            BreakKind::Bank => 0,
         };
         let banked_after = match action {
             BreakAction::SkipToShort => self.bank_min() + offered_base,
@@ -343,6 +399,7 @@ impl Timer {
             action,
             banked_min: banked_after,
             duration_min: 0,
+            spend_min: None,
         }
         .into()])
     }
@@ -461,6 +518,9 @@ impl Timer {
     pub fn op_close_day(&self) -> Result<Vec<Event>, OpError> {
         if !matches!(self.phase, Phase::Idle) {
             return Err(OpError::InvalidState("сначала заверши текущий этап".into()));
+        }
+        if self.day_closed {
+            return Err(OpError::InvalidState("день уже закрыт".into()));
         }
         let bank = self.bank_min();
         Ok(vec![DayClosed { burned_min: bank, banked_min_at_close: bank }.into()])
@@ -610,13 +670,27 @@ impl Timer {
                 let offered_base = match e.kind {
                     BreakKind::Short => self.cfg.short_break_min,
                     BreakKind::Long => self.cfg.long_break_min,
+                    BreakKind::Bank => 0,
                 };
                 match e.action {
                     BreakAction::Taken => {
-                        // Длительность уже включает банк этого вида — банк потреблён.
-                        match e.kind {
-                            BreakKind::Short => self.short_extra_min = 0,
-                            BreakKind::Long => self.long_extra_min = 0,
+                        match e.spend_min {
+                            // «Разрыв = отдых»: списать ровно spend минут из банка
+                            // (сначала длинного, потом короткого).
+                            Some(spend) => {
+                                let from_long = spend.min(self.long_extra_min);
+                                self.long_extra_min -= from_long;
+                                self.short_extra_min -= (spend - from_long).min(self.short_extra_min);
+                            }
+                            // Длительность уже включает банк этого вида — банк потреблён.
+                            None => match e.kind {
+                                BreakKind::Short => self.short_extra_min = 0,
+                                BreakKind::Long => self.long_extra_min = 0,
+                                BreakKind::Bank => {
+                                    self.short_extra_min = 0;
+                                    self.long_extra_min = 0;
+                                }
+                            },
                         }
                         self.phase = Phase::Break(BreakPhase {
                             kind: e.kind,
@@ -656,12 +730,14 @@ impl Timer {
                 self.short_extra_min = 0;
                 self.long_extra_min = 0;
                 self.streak = 0;
+                self.day_closed = true;
                 let _ = e;
             }
             E::VaultSyncStatus(_) => {}
         }
         if ts.date_naive() > self.current_date {
             self.current_date = ts.date_naive();
+            self.day_closed = false;
         }
     }
 
@@ -722,7 +798,44 @@ impl Timer {
             return events;
         }
         self.current_date = today;
+        self.day_closed = false;
         Vec::new()
+    }
+
+    /// События для обнаруженного разрыва (FR-4). Обычный ответ — одна запись
+    /// `GapLogged`. Ответ «это был отдых» (v0.1.1): из банка списываются минуты
+    /// под отдых (`BreakEvent` с `spend_min`), остаток сверх банка — обычный
+    /// разрыв; при пустом банке поведение совпадает с обычным ответом.
+    fn gap_events(&self, gap: GapWindow, as_rest: bool) -> Vec<Event> {
+        if !as_rest {
+            return vec![GapLogged { started_at: gap.0, ended_at: gap.1, reason: gap.2 }.into()];
+        }
+        let total_min = (gap.1 - gap.0).num_minutes();
+        let rest_min = total_min.min(self.bank_min());
+        let mut events = Vec::new();
+        if rest_min > 0 {
+            events.push(
+                BreakEvent {
+                    kind: BreakKind::Long,
+                    action: BreakAction::Taken,
+                    banked_min: self.bank_min() - rest_min,
+                    duration_min: rest_min,
+                    spend_min: Some(rest_min),
+                }
+                .into(),
+            );
+        }
+        if total_min > rest_min {
+            events.push(
+                GapLogged {
+                    started_at: gap.0,
+                    ended_at: gap.1 - chrono::Duration::minutes(rest_min),
+                    reason: gap.2,
+                }
+                .into(),
+            );
+        }
+        events
     }
 }
 

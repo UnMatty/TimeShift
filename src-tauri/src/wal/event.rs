@@ -37,12 +37,13 @@ pub enum SessionSource {
     Manual,
 }
 
-/// Вид перерыва (PRD FR-1).
+/// Вид перерыва (PRD FR-1). `Bank` — «отдохнуть весь накопленный банк» (v0.1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BreakKind {
     Short,
     Long,
+    Bank,
 }
 
 /// Действие с перерывом (PRD FR-5).
@@ -154,6 +155,9 @@ pub struct ThoughtResolved {
 /// Событие перерыва: взят или пропущен, состояние банка после события (ARCH §4).
 /// Для взятого перерыва `duration_min` — фактическая длительность (база + банк):
 /// по ней проигрывание восстанавливает идущий перерыв после перезапуска.
+/// `spend_min` (v0.1.1, «разрыв = отдых») — сколько минут списать из банка,
+/// если это не весь банк данного вида; `None` — прежнее поведение. Поле
+/// опционально, поэтому старые записи журнала читаются без миграции.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BreakEvent {
     pub kind: BreakKind,
@@ -161,6 +165,8 @@ pub struct BreakEvent {
     pub banked_min: i64,
     #[serde(default)]
     pub duration_min: i64,
+    #[serde(default)]
+    pub spend_min: Option<i64>,
 }
 
 /// Ручная до-логировка сессии «работал без приложения» (PRD FR-7).

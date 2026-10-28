@@ -304,6 +304,7 @@ fn break_kind_str(k: BreakKind) -> &'static str {
     match k {
         BreakKind::Short => "short",
         BreakKind::Long => "long",
+        BreakKind::Bank => "bank",
     }
 }
 

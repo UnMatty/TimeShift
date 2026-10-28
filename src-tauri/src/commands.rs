@@ -121,9 +121,21 @@ pub fn notify_side_effects(app: &AppHandle, records: &[WalRecord]) {
                     &format!("{planned} минут фокуса. Пора на {break_hint}."),
                 );
             }
-            Event::BreakEvent(e) if e.action == BreakAction::Taken && e.kind == BreakKind::Long => {
-                // Долгий перерыв заслуживает настойчивого напоминания.
+            Event::BreakEvent(e)
+                if e.action == BreakAction::Taken
+                    && e.kind == BreakKind::Long
+                    && e.spend_min.is_none() =>
+            {
+                // Долгий перерыв заслуживает настойчивого напоминания
+                // (запись «разрыв = отдых» — не про отдых у экрана).
                 notify(app, "☕ Длинный перерыв", &format!("{} минут. Отойди от экрана.", e.duration_min));
+            }
+            Event::DayClosed(e) => {
+                notify(
+                    app,
+                    "🌙 День закрыт",
+                    &format!("Банк отдыха сгорел: {} мин. Завтра — новый день.", e.burned_min),
+                );
             }
             _ => {}
         }
@@ -166,7 +178,11 @@ pub fn update_tray(app: &AppHandle, snap: &Snapshot) {
             format!("{mark} {}:{:02}", remaining / 60, remaining % 60)
         }
         crate::timer::PhaseView::Break { break_kind, remaining_secs, .. } => {
-            let mark = if *break_kind == BreakKind::Long { "☕" } else { "💬" };
+            let mark = match break_kind {
+                BreakKind::Long => "☕",
+                BreakKind::Bank => "🛌",
+                BreakKind::Short => "💬",
+            };
             format!("{mark} {}:{:02}", remaining_secs / 60, remaining_secs % 60)
         }
     };
@@ -194,8 +210,12 @@ pub fn start_focus(
     label: Option<String>,
     confidential: bool,
     gap_reason: Option<String>,
+    gap_as_rest: bool,
+    category: Option<Category>,
 ) -> Result<Snapshot, CmdError> {
-    let snap = run_op(&app, |t| t.op_start_focus(Local::now(), label, confidential, gap_reason))?;
+    let snap = run_op(&app, |t| {
+        t.op_start_focus(Local::now(), label, confidential, gap_reason, gap_as_rest, category)
+    })?;
     maybe_notify_bank(&app);
     Ok(snap)
 }
@@ -221,8 +241,22 @@ pub fn void_session(app: AppHandle, reason: Option<String>) -> Result<Snapshot, 
 }
 
 #[tauri::command]
-pub fn start_break(app: AppHandle, gap_reason: Option<String>) -> Result<Snapshot, CmdError> {
-    run_op(&app, |t| t.op_start_break(Local::now(), gap_reason))
+pub fn start_break(
+    app: AppHandle,
+    gap_reason: Option<String>,
+    gap_as_rest: bool,
+) -> Result<Snapshot, CmdError> {
+    run_op(&app, |t| t.op_start_break(Local::now(), gap_reason, gap_as_rest))
+}
+
+/// «Отдохнуть весь накопленный банк» (v0.1.1).
+#[tauri::command]
+pub fn start_bank_break(
+    app: AppHandle,
+    gap_reason: Option<String>,
+    gap_as_rest: bool,
+) -> Result<Snapshot, CmdError> {
+    run_op(&app, |t| t.op_start_bank_break(Local::now(), gap_reason, gap_as_rest))
 }
 
 #[tauri::command]

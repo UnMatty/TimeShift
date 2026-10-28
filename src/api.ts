@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type PauseReason = "internal" | "external" | "away";
 export type Category = "work" | "personal" | "meeting";
-export type BreakKind = "short" | "long";
+export type BreakKind = "short" | "long" | "bank";
 export type BreakAction = "taken" | "skip_to_short" | "skip_to_long" | "skip_plain";
 export type ThoughtResolution = "note" | "task_draft" | "dismissed";
 export type SessionStatus = "running" | "paused" | "completed" | "partial" | "void";
@@ -76,6 +76,7 @@ export interface Snapshot {
   bank_min: number;
   streak: number;
   day: string;
+  day_closed: boolean;
   sessions: UiSession[];
   gaps: UiGap[];
   thoughts: UiThought[];
@@ -105,13 +106,21 @@ export function isCmdError(e: unknown): e is CmdError {
 export const api = {
   getSnapshot: () => invoke<Snapshot>("get_snapshot"),
   dbStatus: () => invoke<boolean>("db_status"),
-  startFocus: (label: string | null, confidential: boolean, gap_reason: string | null) =>
-    invoke<Snapshot>("start_focus", { label, confidential, gapReason: gap_reason }),
+  startFocus: (
+    label: string | null,
+    confidential: boolean,
+    gap_reason: string | null,
+    gap_as_rest: boolean,
+    category: Category | null,
+  ) => invoke<Snapshot>("start_focus", { label, confidential, gapReason: gap_reason, gapAsRest: gap_as_rest, category }),
   pauseFocus: () => invoke<Snapshot>("pause_focus"),
   resumeFocus: (reason: PauseReason) => invoke<Snapshot>("resume_focus", { reason }),
   completeFocus: () => invoke<Snapshot>("complete_focus"),
   voidSession: (reason: string | null) => invoke<Snapshot>("void_session", { reason }),
-  startBreak: (gap_reason: string | null) => invoke<Snapshot>("start_break", { gapReason: gap_reason }),
+  startBreak: (gap_reason: string | null, gap_as_rest: boolean) =>
+    invoke<Snapshot>("start_break", { gapReason: gap_reason, gapAsRest: gap_as_rest }),
+  startBankBreak: (gap_reason: string | null, gap_as_rest: boolean) =>
+    invoke<Snapshot>("start_bank_break", { gapReason: gap_reason, gapAsRest: gap_as_rest }),
   skipBreak: (action: BreakAction) => invoke<Snapshot>("skip_break", { action }),
   endBreak: () => invoke<Snapshot>("end_break"),
   parkThought: (text: string) => invoke<Snapshot>("park_thought", { text }),
@@ -166,6 +175,16 @@ export const CATEGORY_LABEL: Record<Category, string> = {
   personal: "личное",
   meeting: "встреча",
 };
+
+export const BREAK_KIND_LABEL: Record<BreakKind, string> = {
+  short: "Короткий перерыв",
+  long: "Длинный перерыв",
+  bank: "Отдых из банка",
+};
+
+export function breakIcon(kind: BreakKind): string {
+  return kind === "long" ? "☕" : kind === "bank" ? "🛌" : "💬";
+}
 
 export const PAUSE_REASON_LABEL: Record<PauseReason, string> = {
   internal: "сам отвлёкся",
