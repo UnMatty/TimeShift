@@ -21,6 +21,51 @@ use crate::wal::event::*;
 // Модель состояния
 // ---------------------------------------------------------------------------
 
+/// План дня (v0.2, PRD §4.5): задачи из «☀️ Сегодня» + ручные, встречи вручную.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DayPlan {
+    pub day: NaiveDate,
+    pub tasks: Vec<PlanTask>,
+    pub meetings: Vec<PlanMeeting>,
+}
+
+/// Задача плана в терминах UI: состояние + факт (завершённые помидорки по ней).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UiPlanTask {
+    pub id: Uuid,
+    pub section: PlanSection,
+    pub title: String,
+    pub wiki_links: Vec<String>,
+    pub marker: Option<String>,
+    pub est_pomodoros: Option<u32>,
+    pub done: bool,
+    /// Чекбокс в «☀️ Сегодня» уже проставлен синком.
+    pub today_note_done: bool,
+    /// Задача пришла из «Сегодня» (есть строка для обратной синхронизации).
+    pub from_today_note: bool,
+    /// Факт: завершённые (полностью или частично) помидорки по задаче.
+    pub fact_pomodoros: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UiPlanMeeting {
+    pub id: Uuid,
+    pub title: String,
+    pub starts_at: Option<DateTime<Local>>,
+    pub duration_min: Option<i64>,
+    pub happened: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UiPlan {
+    pub day: NaiveDate,
+    pub tasks: Vec<UiPlanTask>,
+    pub meetings: Vec<UiPlanMeeting>,
+}
+
 /// Окно разрыва: конец предыдущего этапа, старт нового, причина.
 type GapWindow = (DateTime<Local>, DateTime<Local>, String);
 
@@ -56,6 +101,8 @@ pub struct UiSession {
     pub note: String,
     pub label: Option<String>,
     pub source: SessionSource,
+    /// Задача плана дня, под которую шла помидорка (v0.2).
+    pub plan_task_id: Option<Uuid>,
     pub pauses: Vec<UiPause>,
 }
 
@@ -124,6 +171,9 @@ pub struct Snapshot {
     pub streak: u32,
     pub day: NaiveDate,
     pub day_closed: bool,
+    /// Сколько минут банка сгорело при закрытии дня (для фокус-лога и UI).
+    pub burned_bank_min: i64,
+    pub plan: Option<UiPlan>,
     pub sessions: Vec<UiSession>,
     pub gaps: Vec<UiGap>,
     pub thoughts: Vec<UiThought>,
@@ -170,6 +220,10 @@ pub struct Timer {
     pub current_date: NaiveDate,
     /// День закрыт кнопкой «Завершить день» (до полуночи повторно не закрывается).
     pub day_closed: bool,
+    /// Сколько банка сгорело при закрытии дня (для фокус-лога).
+    pub burned_bank_min: i64,
+    /// План дня (v0.2): задачи из «☀️ Сегодня» + ручные, встречи.
+    pub plan: Option<DayPlan>,
     pub sessions: Vec<UiSession>,
     pub gaps: Vec<UiGap>,
     pub thoughts: Vec<UiThought>,
@@ -187,6 +241,8 @@ impl Timer {
             last_stage_end: None,
             current_date: Local::now().date_naive(),
             day_closed: false,
+            burned_bank_min: 0,
+            plan: None,
             sessions: Vec::new(),
             gaps: Vec::new(),
             thoughts: Vec::new(),
@@ -251,12 +307,58 @@ impl Timer {
             streak: self.streak,
             day: self.current_date,
             day_closed: self.day_closed,
+            burned_bank_min: self.burned_bank_min,
+            plan: self.plan_view(),
             sessions: self.sessions.clone(),
             gaps: self.gaps.clone(),
             thoughts: self.thoughts.clone(),
             breaks: self.breaks.clone(),
             proposed_break: self.proposed_break(),
         }
+    }
+
+    /// План дня для UI: задачи с фактом по завершённым сессиям (FR-16).
+    fn plan_view(&self) -> Option<UiPlan> {
+        let plan = self.plan.as_ref()?;
+        let fact = |task_id: Uuid| {
+            self.sessions
+                .iter()
+                .filter(|s| {
+                    s.plan_task_id == Some(task_id)
+                        && matches!(s.status, SessionStatus::Completed | SessionStatus::Partial)
+                })
+                .count() as u32
+        };
+        Some(UiPlan {
+            day: plan.day,
+            tasks: plan
+                .tasks
+                .iter()
+                .map(|t| UiPlanTask {
+                    id: t.id,
+                    section: t.section,
+                    title: t.title.clone(),
+                    wiki_links: t.wiki_links.clone(),
+                    marker: t.marker.clone(),
+                    est_pomodoros: t.est_pomodoros,
+                    done: t.done,
+                    today_note_done: t.today_note_done,
+                    from_today_note: t.today_note_line.is_some(),
+                    fact_pomodoros: fact(t.id),
+                })
+                .collect(),
+            meetings: plan
+                .meetings
+                .iter()
+                .map(|m| UiPlanMeeting {
+                    id: m.id,
+                    title: m.title.clone(),
+                    starts_at: m.starts_at,
+                    duration_min: m.duration_min,
+                    happened: m.happened,
+                })
+                .collect(),
+        })
     }
 
     fn current_session_pauses(&self, session_id: Uuid) -> Vec<UiPause> {
@@ -275,7 +377,9 @@ impl Timer {
     /// причина не передана — `NeedGap` (FR-4), команда вернёт её в UI.
     /// `gap_as_rest` — ответ «это был отдых»: минуты разрыва списываются из банка,
     /// остаток сверх банка логируется обычным разрывом. `category` — тип фокуса,
-    /// выбранный до старта (v0.1.1).
+    /// выбранный до старта (v0.1.1). `plan_task_id` — задача плана дня (v0.2).
+    /// Аргументов осознанно много — это плоский вход одной операции FSM.
+    #[allow(clippy::too_many_arguments)]
     pub fn op_start_focus(
         &self,
         now: DateTime<Local>,
@@ -284,9 +388,19 @@ impl Timer {
         gap_reason: Option<String>,
         gap_as_rest: bool,
         category: Option<Category>,
+        plan_task_id: Option<Uuid>,
     ) -> Result<Vec<Event>, OpError> {
         if !matches!(self.phase, Phase::Idle) {
             return Err(OpError::InvalidState("этап уже идёт".into()));
+        }
+        if let Some(id) = plan_task_id {
+            let known = self
+                .plan
+                .as_ref()
+                .is_some_and(|p| p.tasks.iter().any(|t| t.id == id));
+            if !known {
+                return Err(OpError::InvalidState("задача плана не найдена".into()));
+            }
         }
         let mut events = Vec::new();
         if let Some(gap) = self.detect_gap(now, gap_reason)? {
@@ -299,6 +413,7 @@ impl Timer {
             source: SessionSource::Timer,
             label: label.filter(|l| !l.trim().is_empty()),
             confidential,
+            plan_task_id,
         }
         .into());
         if let Some(category) = category {
@@ -489,6 +604,132 @@ impl Timer {
         Ok(vec![CategorySet { session_id, category }.into()])
     }
 
+    // -----------------------------------------------------------------------
+    // План дня (v0.2, PRD FR-14…FR-18). Операции только валидируют и порождают
+    // события; чекбоксы «☀️ Сегодня» проставляет vault-синк (PlanTaskSynced).
+    // -----------------------------------------------------------------------
+
+    /// Импорт/пересборка плана из «☀️ Сегодня» (заменяет задачи, встречи хранит).
+    pub fn op_build_plan(
+        &self,
+        day: NaiveDate,
+        tasks: Vec<PlanTask>,
+        today_note_snapshot: Option<String>,
+    ) -> Result<Vec<Event>, OpError> {
+        if day != self.current_date {
+            return Err(OpError::InvalidState("план собирается на сегодняшний день".into()));
+        }
+        Ok(vec![PlanBuilt { day, tasks, today_note_snapshot }.into()])
+    }
+
+    fn require_plan(&self) -> Result<(), OpError> {
+        self.plan.as_ref().map(|_| ()).ok_or_else(|| OpError::InvalidState("план дня ещё не собран".into()))
+    }
+
+    /// Ручное добавление задачи в план.
+    pub fn op_add_plan_task(
+        &self,
+        section: PlanSection,
+        title: String,
+        est_pomodoros: Option<u32>,
+    ) -> Result<Vec<Event>, OpError> {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Err(OpError::InvalidState("пустая задача".into()));
+        }
+        self.require_plan()?;
+        Ok(vec![PlanTaskAdded {
+            task: PlanTask {
+                id: Uuid::new_v4(),
+                section,
+                title,
+                wiki_links: Vec::new(),
+                marker: None,
+                today_note_line: None,
+                est_pomodoros,
+                done: false,
+                today_note_done: false,
+            },
+        }
+        .into()])
+    }
+
+    pub fn op_remove_plan_task(&self, task_id: Uuid) -> Result<Vec<Event>, OpError> {
+        let known = self.plan.as_ref().is_some_and(|p| p.tasks.iter().any(|t| t.id == task_id));
+        if !known {
+            return Err(OpError::InvalidState("задача плана не найдена".into()));
+        }
+        Ok(vec![PlanTaskRemoved { task_id }.into()])
+    }
+
+    /// Раскладка по секциям и оценка в помидорках (FR-14, FR-16).
+    pub fn op_edit_plan_task(
+        &self,
+        task_id: Uuid,
+        section: Option<PlanSection>,
+        est_pomodoros: Option<u32>,
+    ) -> Result<Vec<Event>, OpError> {
+        let known = self.plan.as_ref().is_some_and(|p| p.tasks.iter().any(|t| t.id == task_id));
+        if !known {
+            return Err(OpError::InvalidState("задача плана не найдена".into()));
+        }
+        if section.is_none() && est_pomodoros.is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![PlanTaskEdited { task_id, section, est_pomodoros }.into()])
+    }
+
+    /// Отметка выполненной в приложении; чекбокс догонит через vault-синк.
+    pub fn op_set_plan_task_done(&self, task_id: Uuid, done: bool) -> Result<Vec<Event>, OpError> {
+        let task = self
+            .plan
+            .as_ref()
+            .and_then(|p| p.tasks.iter().find(|t| t.id == task_id))
+            .ok_or_else(|| OpError::InvalidState("задача плана не найдена".into()))?;
+        if task.done == done {
+            return Ok(Vec::new());
+        }
+        Ok(vec![PlanTaskCompleted { task_id, done }.into()])
+    }
+
+    /// Факт синхронизации чекбокса «☀️ Сегодня» (вызывает vault-синк).
+    pub fn op_plan_task_synced(
+        &self,
+        task_id: Uuid,
+        today_note_done: bool,
+        conflict: Option<String>,
+    ) -> Result<Vec<Event>, OpError> {
+        self.require_plan()?;
+        Ok(vec![PlanTaskSynced { task_id, today_note_done, conflict }.into()])
+    }
+
+    /// Ручная встреча дня (FR-17).
+    pub fn op_add_meeting(
+        &self,
+        title: String,
+        starts_at: Option<DateTime<Local>>,
+        duration_min: Option<i64>,
+    ) -> Result<Vec<Event>, OpError> {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Err(OpError::InvalidState("пустая тема встречи".into()));
+        }
+        self.require_plan()?;
+        Ok(vec![MeetingAdded {
+            meeting: PlanMeeting { id: Uuid::new_v4(), title, starts_at, duration_min, happened: false },
+        }
+        .into()])
+    }
+
+    /// Вечерняя отметка: состоялась / перенесена.
+    pub fn op_set_meeting_happened(&self, meeting_id: Uuid, happened: bool) -> Result<Vec<Event>, OpError> {
+        let known = self.plan.as_ref().is_some_and(|p| p.meetings.iter().any(|m| m.id == meeting_id));
+        if !known {
+            return Err(OpError::InvalidState("встреча не найдена".into()));
+        }
+        Ok(vec![MeetingHappened { meeting_id, happened }.into()])
+    }
+
     /// Ручная до-логировка «работал без приложения» (PRD FR-7).
     pub fn op_add_manual_session(
         &self,
@@ -556,6 +797,7 @@ impl Timer {
                     note: String::new(),
                     label: e.label,
                     source: e.source,
+                    plan_task_id: e.plan_task_id,
                     pauses: Vec::new(),
                 });
                 if e.source == SessionSource::Timer {
@@ -723,6 +965,7 @@ impl Timer {
                     note: e.note.unwrap_or_default(),
                     label: e.label,
                     source: SessionSource::Manual,
+                    plan_task_id: None,
                     pauses: Vec::new(),
                 });
             }
@@ -731,13 +974,84 @@ impl Timer {
                 self.long_extra_min = 0;
                 self.streak = 0;
                 self.day_closed = true;
+                self.burned_bank_min = e.burned_min;
                 let _ = e;
+            }
+            E::PlanBuilt(e) => {
+                let meetings = match &self.plan {
+                    // Пересборка хранит вручную добавленные встречи того же дня.
+                    Some(existing) if existing.day == e.day => existing.meetings.clone(),
+                    _ => Vec::new(),
+                };
+                self.plan = Some(DayPlan { day: e.day, tasks: e.tasks, meetings });
+            }
+            E::PlanTaskAdded(e) => {
+                if let Some(plan) = &mut self.plan
+                    && !plan.tasks.iter().any(|t| t.id == e.task.id) {
+                        plan.tasks.push(e.task);
+                    }
+            }
+            E::PlanTaskRemoved(e) => {
+                if let Some(plan) = &mut self.plan {
+                    plan.tasks.retain(|t| t.id != e.task_id);
+                }
+            }
+            E::PlanTaskEdited(e) => {
+                if let Some(task) = self
+                    .plan
+                    .as_mut()
+                    .and_then(|p| p.tasks.iter_mut().find(|t| t.id == e.task_id))
+                {
+                    if let Some(section) = e.section {
+                        task.section = section;
+                    }
+                    if let Some(est) = e.est_pomodoros {
+                        task.est_pomodoros = Some(est);
+                    }
+                }
+            }
+            E::PlanTaskCompleted(e) => {
+                if let Some(task) = self
+                    .plan
+                    .as_mut()
+                    .and_then(|p| p.tasks.iter_mut().find(|t| t.id == e.task_id))
+                {
+                    task.done = e.done;
+                }
+            }
+            E::PlanTaskSynced(e) => {
+                if let Some(task) = self
+                    .plan
+                    .as_mut()
+                    .and_then(|p| p.tasks.iter_mut().find(|t| t.id == e.task_id))
+                    && e.conflict.is_none()
+                {
+                    task.today_note_done = e.today_note_done;
+                }
+            }
+            E::MeetingAdded(e) => {
+                if let Some(plan) = &mut self.plan
+                    && !plan.meetings.iter().any(|m| m.id == e.meeting.id) {
+                        plan.meetings.push(e.meeting);
+                    }
+            }
+            E::MeetingHappened(e) => {
+                if let Some(meeting) = self
+                    .plan
+                    .as_mut()
+                    .and_then(|p| p.meetings.iter_mut().find(|m| m.id == e.meeting_id))
+                {
+                    meeting.happened = e.happened;
+                }
             }
             E::VaultSyncStatus(_) => {}
         }
         if ts.date_naive() > self.current_date {
             self.current_date = ts.date_naive();
             self.day_closed = false;
+            self.burned_bank_min = 0;
+            // План — дневные данные: в новый день собирается заново из «Сегодня».
+            self.plan = None;
         }
     }
 
@@ -799,6 +1113,8 @@ impl Timer {
         }
         self.current_date = today;
         self.day_closed = false;
+        self.burned_bank_min = 0;
+        self.plan = None;
         Vec::new()
     }
 

@@ -103,8 +103,8 @@ async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &Wal
     match record.event.clone() {
         Event::SessionStarted(e) => {
             sqlx::query(
-                "INSERT INTO focus_sessions (id, started_at, planned_min, status, confidential, note, source, label)
-                 VALUES ($1, $2, $3, 'running', $4, '', $5, $6)",
+                "INSERT INTO focus_sessions (id, started_at, planned_min, status, confidential, note, source, label, plan_task_id)
+                 VALUES ($1, $2, $3, 'running', $4, '', $5, $6, $7)",
             )
             .bind(e.session_id)
             .bind(ts)
@@ -112,6 +112,7 @@ async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &Wal
             .bind(e.confidential)
             .bind(source_str(e.source))
             .bind(e.label)
+            .bind(e.plan_task_id)
             .execute(&mut **tx)
             .await
             .map_err(err("session_started"))?;
@@ -260,6 +261,138 @@ async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &Wal
             .await
             .map_err(err("day_closed"))?;
         }
+        Event::PlanBuilt(e) => {
+            sqlx::query(
+                "INSERT INTO day_plans (id, day, today_note_snapshot) VALUES ($1, $2, $3)
+                 ON CONFLICT (day) DO UPDATE SET today_note_snapshot = EXCLUDED.today_note_snapshot",
+            )
+            .bind(Uuid::new_v4())
+            .bind(e.day)
+            .bind(e.today_note_snapshot)
+            .execute(&mut **tx)
+            .await
+            .map_err(err("plan_built/plan"))?;
+            // Пересборка заменяет задачи целиком (встречи в fold хранятся).
+            sqlx::query("DELETE FROM day_plan_tasks WHERE plan_id = (SELECT id FROM day_plans WHERE day = $1)")
+                .bind(e.day)
+                .execute(&mut **tx)
+                .await
+                .map_err(err("plan_built/clear"))?;
+            for (position, task) in e.tasks.iter().enumerate() {
+                let plan_id: Uuid = sqlx::query_scalar("SELECT id FROM day_plans WHERE day = $1")
+                    .bind(e.day)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(err("plan_built/plan_id"))?;
+                sqlx::query(
+                    "INSERT INTO day_plan_tasks (id, plan_id, section, title, wiki_links, markers, today_note_line, est_pomodoros, position, done, today_note_done)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                )
+                .bind(task.id)
+                .bind(plan_id)
+                .bind(plan_section_str(task.section))
+                .bind(&task.title)
+                .bind(&task.wiki_links)
+                .bind(task.marker.as_deref())
+                .bind(task.today_note_line.as_deref())
+                .bind(task.est_pomodoros.map(|e| e as i32))
+                .bind(position as i32)
+                .bind(task.done)
+                .bind(task.today_note_done)
+                .execute(&mut **tx)
+                .await
+                .map_err(err("plan_built/task"))?;
+            }
+        }
+        Event::PlanTaskAdded(e) => {
+            sqlx::query(
+                "INSERT INTO day_plan_tasks (id, plan_id, section, title, wiki_links, markers, today_note_line, est_pomodoros, position, done, today_note_done)
+                 VALUES ($1, (SELECT id FROM day_plans WHERE day = $2), $3, $4, $5, $6, $7, $8,
+                         (SELECT COALESCE(MAX(position), 0) + 1 FROM day_plan_tasks WHERE plan_id = (SELECT id FROM day_plans WHERE day = $2)), $9, $10)",
+            )
+            .bind(e.task.id)
+            .bind(ts.date_naive())
+            .bind(plan_section_str(e.task.section))
+            .bind(&e.task.title)
+            .bind(&e.task.wiki_links)
+            .bind(e.task.marker.as_deref())
+            .bind(e.task.today_note_line.as_deref())
+            .bind(e.task.est_pomodoros.map(|x| x as i32))
+            .bind(e.task.done)
+            .bind(e.task.today_note_done)
+            .execute(&mut **tx)
+            .await
+            .map_err(err("plan_task_added"))?;
+        }
+        Event::PlanTaskRemoved(e) => {
+            // Сессии, привязанные к задаче, отвязываем — FK не должен рвать репликацию.
+            sqlx::query("UPDATE focus_sessions SET plan_task_id = NULL WHERE plan_task_id = $1")
+                .bind(e.task_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(err("plan_task_removed/detach"))?;
+            sqlx::query("DELETE FROM day_plan_tasks WHERE id = $1")
+                .bind(e.task_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(err("plan_task_removed"))?;
+        }
+        Event::PlanTaskEdited(e) => {
+            // Поле-Option обновляется, только если в событии задано (None = не менялось).
+            sqlx::query(
+                "UPDATE day_plan_tasks SET
+                   section = COALESCE($2, section),
+                   est_pomodoros = COALESCE($3, est_pomodoros)
+                 WHERE id = $1",
+            )
+            .bind(e.task_id)
+            .bind(e.section.map(plan_section_str))
+            .bind(e.est_pomodoros.map(|x| x as i32))
+            .execute(&mut **tx)
+            .await
+            .map_err(err("plan_task_edited"))?;
+        }
+        Event::PlanTaskCompleted(e) => {
+            sqlx::query("UPDATE day_plan_tasks SET done = $2 WHERE id = $1")
+                .bind(e.task_id)
+                .bind(e.done)
+                .execute(&mut **tx)
+                .await
+                .map_err(err("plan_task_completed"))?;
+        }
+        Event::PlanTaskSynced(e) => {
+            if e.conflict.is_none() {
+                sqlx::query("UPDATE day_plan_tasks SET today_note_done = $2 WHERE id = $1")
+                    .bind(e.task_id)
+                    .bind(e.today_note_done)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(err("plan_task_synced"))?;
+            }
+        }
+        Event::MeetingAdded(e) => {
+            sqlx::query(
+                "INSERT INTO plan_meetings (id, plan_id, title, starts_at, duration_min, happened)
+                 VALUES ($1, (SELECT id FROM day_plans WHERE day = $2), $3, $4, $5, $6)",
+            )
+            .bind(e.meeting.id)
+            .bind(ts.date_naive())
+            .bind(&e.meeting.title)
+            .bind(e.meeting.starts_at)
+            .bind(e.meeting.duration_min.map(|m| m as i32))
+            .bind(e.meeting.happened)
+            .execute(&mut **tx)
+            .await
+            .map_err(err("meeting_added"))?;
+        }
+        Event::MeetingHappened(e) => {
+            sqlx::query("UPDATE plan_meetings SET happened = $2 WHERE id = $1")
+                .bind(e.meeting_id)
+                .bind(e.happened)
+                .execute(&mut **tx)
+                .await
+                .map_err(err("meeting_happened"))?;
+        }
         Event::VaultSyncStatus(_) => {}
     }
     Ok(())
@@ -314,5 +447,12 @@ fn break_action_str(a: BreakAction) -> &'static str {
         BreakAction::SkipToShort => "skip_to_short",
         BreakAction::SkipToLong => "skip_to_long",
         BreakAction::SkipPlain => "skip_plain",
+    }
+}
+
+fn plan_section_str(s: PlanSection) -> &'static str {
+    match s {
+        PlanSection::Work => "work",
+        PlanSection::Personal => "personal",
     }
 }

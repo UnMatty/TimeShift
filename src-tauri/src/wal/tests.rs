@@ -30,6 +30,7 @@ fn record_shape_locks_contract() {
             source: SessionSource::Timer,
             label: Some("отчёты".into()),
             confidential: false,
+           plan_task_id: None,
         })
         .expect("append");
 
@@ -60,7 +61,7 @@ fn roundtrip_all_event_variants() {
     let now = Local::now();
 
     let events: Vec<Event> = vec![
-        SessionStarted { session_id, planned_min: 25, source: SessionSource::Timer, label: None, confidential: true }.into(),
+        SessionStarted { session_id, planned_min: 25, source: SessionSource::Timer, label: None, confidential: true, plan_task_id: None }.into(),
         SessionPaused { session_id, pause_id }.into(),
         PauseReasonEvent { session_id, pause_id, reason: PauseReason::External }.into(),
         SessionResumed { session_id }.into(),
@@ -83,6 +84,33 @@ fn roundtrip_all_event_variants() {
         }
         .into(),
         DayClosed { burned_min: 10, banked_min_at_close: 10 }.into(),
+        PlanBuilt {
+            day: Local::now().date_naive(),
+            tasks: vec![PlanTask {
+                id: Uuid::new_v4(),
+                section: PlanSection::Work,
+                title: "задача из «Сегодня»".into(),
+                wiki_links: vec!["Ссылка".into()],
+                marker: Some("▲".into()),
+                today_note_line: Some("- [ ] ▲ задача".into()),
+                est_pomodoros: Some(2),
+                done: true,
+                today_note_done: false,
+            }],
+            today_note_snapshot: Some("сырой текст заметки".into()),
+        }
+        .into(),
+        MeetingAdded {
+            meeting: PlanMeeting {
+                id: Uuid::new_v4(),
+                title: "Дейлик".into(),
+                starts_at: Some(now),
+                duration_min: Some(15),
+                happened: true,
+            },
+        }
+        .into(),
+        PlanTaskSynced { task_id: Uuid::new_v4(), today_note_done: true, conflict: None }.into(),
         VaultSyncStatus { ok: false, detail: Some("Docker остановлен".into()) }.into(),
     ];
 
@@ -90,7 +118,7 @@ fn roundtrip_all_event_variants() {
         wal.append(event.clone()).expect("append");
     }
     let playback = read_all(wal.dir()).expect("read_all");
-    assert_eq!(playback.events.len(), 15);
+    assert_eq!(playback.events.len(), 18);
     assert_eq!(playback.skipped_lines, 0);
     assert_eq!(playback.skipped_files, 0);
     for (original, played) in events.iter().zip(playback.events.iter()) {

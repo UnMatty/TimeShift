@@ -9,15 +9,16 @@ import {
   CATEGORY_LABEL,
   isCmdError,
   PAUSE_REASON_LABEL,
+  PLAN_SECTION_LABEL,
   RESOLUTION_LABEL,
   STATUS_LABEL,
   fmtClock,
   fmtTime,
 } from "./api";
-import type { Category, PauseReason, Settings, Snapshot, UiSession } from "./api";
+import type { Category, PauseReason, PlanSection, Settings, Snapshot, UiSession } from "./api";
 import "./App.css";
 
-type Tab = "day" | "parking" | "settings";
+type Tab = "day" | "plan" | "parking" | "settings";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("day");
@@ -74,6 +75,7 @@ export default function App() {
           {(
             [
               ["day", "День"],
+              ["plan", `План${snap.plan ? "" : " ●"}`],
               ["parking", `Парковка${snap.thoughts.some((t) => !t.resolved) ? " ●" : ""}`],
               ["settings", "Настройки"],
             ] as const
@@ -101,6 +103,7 @@ export default function App() {
       )}
 
       {tab === "day" && <DayTab snap={snap} run={run} />}
+      {tab === "plan" && <PlanTab snap={snap} run={run} />}
       {tab === "parking" && <ParkingTab snap={snap} run={run} />}
       {tab === "settings" && <SettingsTab />}
     </main>
@@ -618,6 +621,209 @@ function ManualCard({ run }: { run: (fn: (gapReason?: string, asRest?: boolean) 
         </button>
       </div>
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// План дня (v0.2): импорт из «☀️ Сегодня», секции, оценки, встречи
+// ---------------------------------------------------------------------------
+
+function PlanTab({
+  snap,
+  run,
+}: {
+  snap: Snapshot;
+  run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void>;
+}) {
+  const plan = snap.plan;
+  const [newSection, setNewSection] = useState<PlanSection>("work");
+  const [newTitle, setNewTitle] = useState("");
+  const [newEst, setNewEst] = useState("");
+  const [mTitle, setMTitle] = useState("");
+  const [mTime, setMTime] = useState("");
+  const [mMin, setMMin] = useState("");
+
+  const startTask = (taskId: string) =>
+    void run((gr, asRest) => api.startFocus(null, false, gr ?? null, asRest ?? false, null, taskId));
+  const otherSection = (s: PlanSection): PlanSection => (s === "work" ? "personal" : "work");
+
+  return (
+    <>
+      <section className="card">
+        <div className="row plan-header">
+          <h3 className="grow">
+            План дня{plan && <span className="muted"> на {plan.day}</span>}
+          </h3>
+          <button className="primary" onClick={() => void run(() => api.buildPlanFromToday())}>
+            ⟳ Собрать из «☀️ Сегодня»
+          </button>
+        </div>
+        {!plan && (
+          <p className="muted">
+            План не собран. Импорт возьмёт все чекбоксы из «☀️ Сегодня» (секции «Встречи» и «Дедлайны» — мимо),
+            раскладку по «работа/личное» и оценки в помидорках правишь здесь. Пересборка заменяет задачи,
+            встречи и отметки остаются.
+          </p>
+        )}
+      </section>
+
+      {plan &&
+        (["work", "personal"] as PlanSection[]).map((section) => {
+          const tasks = plan.tasks.filter((t) => t.section === section);
+          return (
+            <section key={section} className="card">
+              <h3>{section === "work" ? "💼 Работа" : "🏠 Личное"}</h3>
+              <div className="sessions">
+                {tasks.length === 0 && <p className="muted">Пусто — перенеси задачи или добавь свою внизу.</p>}
+                {tasks.map((t) => (
+                  <div key={t.id} className={`plan-task ${t.done ? "done" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={t.done}
+                      onChange={(e) => void run(() => api.setPlanTaskDone(t.id, e.currentTarget.checked))}
+                    />
+                    <div className="s-main">
+                      <div className="s-title">
+                        {t.marker && <span className="muted">{t.marker} </span>}
+                        {t.title}
+                        {t.wiki_links.map((l) => (
+                          <span key={l} className="badge">
+                            {l.split("/").pop()}
+                          </span>
+                        ))}
+                        {t.from_today_note &&
+                          (t.today_note_done ? (
+                            <span className="badge st-done">✓ в «Сегодня»</span>
+                          ) : (
+                            <span className="badge">синк чекбокса…</span>
+                          ))}
+                      </div>
+                      <div className="muted small">
+                        план {t.est_pomodoros ?? "—"} · факт {t.fact_pomodoros}
+                      </div>
+                    </div>
+                    <button title="стартовать помидорку по задаче" disabled={t.done} onClick={() => startTask(t.id)}>
+                      ▶ 🍅
+                    </button>
+                    <span className="est">
+                      <button
+                        title="минус помидорка из оценки"
+                        onClick={() =>
+                          void run(() => api.editPlanTask(t.id, null, Math.max((t.est_pomodoros ?? 0) - 1, 0)))
+                        }
+                      >
+                        −
+                      </button>
+                      <b>{t.est_pomodoros ?? 0}🍅</b>
+                      <button title="плюс помидорка к оценке" onClick={() => void run(() => api.editPlanTask(t.id, null, (t.est_pomodoros ?? 0) + 1))}>
+                        +
+                      </button>
+                    </span>
+                    <button title={`перенести в «${PLAN_SECTION_LABEL[otherSection(section)]}»`} onClick={() => void run(() => api.editPlanTask(t.id, otherSection(section), null))}>
+                      ⇄
+                    </button>
+                    <button title="убрать из плана (строка «Сегодня» не трогается)" onClick={() => void run(() => api.removePlanTask(t.id))}>
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+
+      {plan && (
+        <section className="card">
+          <h3>🕐 Встречи</h3>
+          {plan.meetings.length === 0 && <p className="muted">Встреч нет — добавь ниже (тема, время, длительность).</p>}
+          <div className="sessions">
+            {plan.meetings.map((m) => (
+              <div key={m.id} className={`plan-task ${m.happened ? "done" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={m.happened}
+                  title="состоялась"
+                  onChange={(e) => void run(() => api.setMeetingHappened(m.id, e.currentTarget.checked))}
+                />
+                <div className="s-main">
+                  <div className="s-title">{m.title}</div>
+                  <div className="muted small">
+                    {m.starts_at ? fmtTime(m.starts_at) : "время не указано"}
+                    {m.duration_min ? ` · ${m.duration_min} мин` : ""}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="row">
+            <input
+              className="grow"
+              placeholder="тема встречи"
+              value={mTitle}
+              onChange={(e) => setMTitle(e.currentTarget.value)}
+            />
+            <input className="time" placeholder="ЧЧ:ММ" value={mTime} onChange={(e) => setMTime(e.currentTarget.value)} />
+            <input
+              className="time"
+              type="number"
+              min={5}
+              placeholder="мин"
+              value={mMin}
+              onChange={(e) => setMMin(e.currentTarget.value)}
+            />
+            <button
+              disabled={!mTitle.trim()}
+              onClick={() => {
+                void run(() => api.addMeeting(mTitle, mTime.trim() || null, mMin ? Number(mMin) : null));
+                setMTitle("");
+                setMTime("");
+                setMMin("");
+              }}
+            >
+              + встреча
+            </button>
+          </div>
+        </section>
+      )}
+
+      {plan && (
+        <section className="card">
+          <h3>＋ Своя задача</h3>
+          <div className="row">
+            <select value={newSection} onChange={(e) => setNewSection(e.currentTarget.value as PlanSection)}>
+              <option value="work">работа</option>
+              <option value="personal">личное</option>
+            </select>
+            <input
+              className="grow"
+              placeholder="что сделать"
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.currentTarget.value)}
+            />
+            <input
+              className="time"
+              type="number"
+              min={1}
+              placeholder="🍅"
+              value={newEst}
+              onChange={(e) => setNewEst(e.currentTarget.value)}
+            />
+            <button
+              disabled={!newTitle.trim()}
+              onClick={() => {
+                void run(() =>
+                  api.addPlanTask(newSection, newTitle, newEst ? Number(newEst) : null),
+                );
+                setNewTitle("");
+                setNewEst("");
+              }}
+            >
+              + добавить
+            </button>
+          </div>
+        </section>
+      )}
+    </>
   );
 }
 

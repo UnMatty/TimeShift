@@ -6,4 +6,8 @@
 //! обычная проверка. Ключ передаётся Bearer-заголовком из конфига приложения.
 
 pub mod client;
+pub mod daily_note;
 pub mod today;
+
+/// Путь дневного плана в хранилище (контракт ARCH §5).
+pub const TODAY_NOTE_PATH: &str = "☀️ Сегодня.md";

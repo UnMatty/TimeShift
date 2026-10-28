@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 use crate::config::{Config, TimerConfig};
 use crate::timer::{OpError, Snapshot, Timer};
+use crate::vault::client::{VaultClient, VaultError};
+use crate::vault::today::{parse_today, TodayTask};
+use crate::vault::TODAY_NOTE_PATH;
 use crate::wal::event::{WalRecord, *};
 use crate::wal::Wal;
 
@@ -62,6 +65,29 @@ impl From<OpError> for CmdError {
             other => CmdError::Message { text: other.to_string() },
         }
     }
+}
+
+impl From<VaultError> for CmdError {
+    fn from(e: VaultError) -> Self {
+        CmdError::Message { text: e.to_string() }
+    }
+}
+
+/// Клиент хранилища из текущего конфига. Не настроен — внятная ошибка.
+pub fn vault_client(app: &AppHandle) -> Result<VaultClient, CmdError> {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock().expect("конфиг");
+    let url = cfg
+        .vault
+        .api_url
+        .as_deref()
+        .ok_or_else(|| CmdError::Message { text: "хранилище не настроено: нет api_url в ~/.timeshift/config.toml".into() })?;
+    let key = cfg
+        .vault
+        .api_key
+        .as_deref()
+        .ok_or_else(|| CmdError::Message { text: "хранилище не настроено: нет api_key в ~/.timeshift/config.toml".into() })?;
+    VaultClient::new(url, key).map_err(|e| CmdError::Message { text: e })
 }
 
 /// Исполняет операцию: события → WAL → fold → снимок. Общая для окна и трея.
@@ -156,7 +182,7 @@ pub fn maybe_notify_bank(app: &AppHandle) {
     }
 }
 
-fn notify(app: &AppHandle, title: &str, body: &str) {
+pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
     app.notification()
         .builder()
@@ -212,9 +238,34 @@ pub fn start_focus(
     gap_reason: Option<String>,
     gap_as_rest: bool,
     category: Option<Category>,
+    plan_task_id: Option<Uuid>,
 ) -> Result<Snapshot, CmdError> {
+    // Старт по задаче плана: подпись берём из задачи, категорию наследуем из
+    // секции (FR-13), если пользователь не выбрал свою.
+    let resolved = plan_task_id.map(|id| {
+        let state = app.state::<AppState>();
+        let timer = state.timer.lock().expect("таймер");
+        timer
+            .plan
+            .as_ref()
+            .and_then(|p| p.tasks.iter().find(|t| t.id == id))
+            .map(|t| (t.title.clone(), t.section))
+    });
+    let (task_label, task_category) = resolved.flatten().unwrap_or_else(|| (String::new(), PlanSection::Work));
+    let label = match (&label, plan_task_id.is_some()) {
+        (Some(l), _) => Some(l.clone()),
+        (None, true) => Some(task_label),
+        (None, false) => None,
+    };
+    let category = category.or_else(|| {
+        plan_task_id.map(|_| match task_category {
+            PlanSection::Work => Category::Work,
+            PlanSection::Personal => Category::Personal,
+        })
+    });
+
     let snap = run_op(&app, |t| {
-        t.op_start_focus(Local::now(), label, confidential, gap_reason, gap_as_rest, category)
+        t.op_start_focus(Local::now(), label, confidential, gap_reason, gap_as_rest, category, plan_task_id)
     })?;
     maybe_notify_bank(&app);
     Ok(snap)
@@ -326,6 +377,104 @@ pub fn add_manual_session(
 #[tauri::command]
 pub fn close_day(app: AppHandle) -> Result<Snapshot, CmdError> {
     run_op(&app, |t| t.op_close_day())
+}
+
+// ---------------------------------------------------------------------------
+// План дня (v0.2, PRD FR-14…FR-18)
+// ---------------------------------------------------------------------------
+
+/// Импорт плана из «☀️ Сегодня»: свежее чтение → парсер → событие PlanBuilt.
+/// Ноль чекбоксов — не тихий пустой план, а внятная ошибка (ARCH §9).
+#[tauri::command]
+pub async fn build_plan_from_today(app: AppHandle) -> Result<Snapshot, CmdError> {
+    let client = vault_client(&app)?;
+    let raw = client.read_note(TODAY_NOTE_PATH).await?;
+    let note = parse_today(&raw);
+    if note.is_empty() {
+        return Err(CmdError::Message {
+            text: "в «☀️ Сегодня» не нашлось ни одного чекбокса — заметка пустая или формат изменился".into(),
+        });
+    }
+    let day = {
+        let state = app.state::<AppState>();
+        state.timer.lock().expect("таймер").current_date
+    };
+    let tasks: Vec<PlanTask> = note.tasks.into_iter().map(today_task_into_plan).collect();
+    run_op(&app, |t| t.op_build_plan(day, tasks, Some(raw)))
+}
+
+fn today_task_into_plan(t: TodayTask) -> PlanTask {
+    PlanTask {
+        id: Uuid::new_v4(),
+        section: t.section,
+        title: t.title,
+        wiki_links: t.wiki_links,
+        marker: t.marker,
+        today_note_line: Some(t.raw_line),
+        est_pomodoros: None,
+        done: t.done,
+        today_note_done: t.done,
+    }
+}
+
+#[tauri::command]
+pub fn add_plan_task(
+    app: AppHandle,
+    section: PlanSection,
+    title: String,
+    est_pomodoros: Option<u32>,
+) -> Result<Snapshot, CmdError> {
+    run_op(&app, |t| t.op_add_plan_task(section, title, est_pomodoros))
+}
+
+#[tauri::command]
+pub fn remove_plan_task(app: AppHandle, task_id: Uuid) -> Result<Snapshot, CmdError> {
+    run_op(&app, |t| t.op_remove_plan_task(task_id))
+}
+
+/// Раскладка по секциям и/или оценка; null/отсутствие поля = не менять.
+#[tauri::command]
+pub fn edit_plan_task(
+    app: AppHandle,
+    task_id: Uuid,
+    section: Option<PlanSection>,
+    est_pomodoros: Option<u32>,
+) -> Result<Snapshot, CmdError> {
+    run_op(&app, |t| t.op_edit_plan_task(task_id, section, est_pomodoros))
+}
+
+#[tauri::command]
+pub fn set_plan_task_done(app: AppHandle, task_id: Uuid, done: bool) -> Result<Snapshot, CmdError> {
+    run_op(&app, |t| t.op_set_plan_task_done(task_id, done))
+}
+
+#[tauri::command]
+pub fn add_meeting(
+    app: AppHandle,
+    title: String,
+    starts_at: Option<String>,
+    duration_min: Option<i64>,
+) -> Result<Snapshot, CmdError> {
+    let starts_at = match starts_at.as_deref() {
+        None | Some("") => None,
+        Some(hhmm) => {
+            use chrono::TimeZone as _;
+            let time = NaiveTime::parse_from_str(hhmm, "%H:%M")
+                .map_err(|_| CmdError::Message { text: "время встречи в формате ЧЧ:ММ".into() })?;
+            let naive = Local::now().date_naive().and_time(time);
+            Some(
+                Local.from_local_datetime(&naive).single().ok_or_else(|| CmdError::Message {
+                    text: "некорректное локальное время встречи".into(),
+                })?,
+            )
+        }
+    };
+    run_op(&app, |t| t.op_add_meeting(title, starts_at, duration_min))
+}
+
+#[tauri::command]
+pub fn set_meeting_happened(app: AppHandle, meeting_id: Uuid, happened: bool) -> Result<Snapshot, CmdError> {
+    run_op(&app, |t| t.op_set_meeting_happened(meeting_id, happened))
 }
 
 // ---------------------------------------------------------------------------

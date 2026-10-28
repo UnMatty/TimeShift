@@ -8,6 +8,7 @@ export type BreakAction = "taken" | "skip_to_short" | "skip_to_long" | "skip_pla
 export type ThoughtResolution = "note" | "task_draft" | "dismissed";
 export type SessionStatus = "running" | "paused" | "completed" | "partial" | "void";
 export type SessionSource = "timer" | "manual";
+export type PlanSection = "work" | "personal";
 
 export interface UiPause {
   started_at: string;
@@ -27,6 +28,7 @@ export interface UiSession {
   note: string;
   label: string | null;
   source: SessionSource;
+  plan_task_id: string | null;
   pauses: UiPause[];
 }
 
@@ -71,12 +73,41 @@ export interface ProposedBreak {
   duration_min: number;
 }
 
+export interface UiPlanTask {
+  id: string;
+  section: PlanSection;
+  title: string;
+  wiki_links: string[];
+  marker: string | null;
+  est_pomodoros: number | null;
+  done: boolean;
+  today_note_done: boolean;
+  from_today_note: boolean;
+  fact_pomodoros: number;
+}
+
+export interface UiPlanMeeting {
+  id: string;
+  title: string;
+  starts_at: string | null;
+  duration_min: number | null;
+  happened: boolean;
+}
+
+export interface UiPlan {
+  day: string;
+  tasks: UiPlanTask[];
+  meetings: UiPlanMeeting[];
+}
+
 export interface Snapshot {
   phase: PhaseView;
   bank_min: number;
   streak: number;
   day: string;
   day_closed: boolean;
+  burned_bank_min: number;
+  plan: UiPlan | null;
   sessions: UiSession[];
   gaps: UiGap[];
   thoughts: UiThought[];
@@ -112,7 +143,16 @@ export const api = {
     gap_reason: string | null,
     gap_as_rest: boolean,
     category: Category | null,
-  ) => invoke<Snapshot>("start_focus", { label, confidential, gapReason: gap_reason, gapAsRest: gap_as_rest, category }),
+    plan_task_id?: string | null,
+  ) =>
+    invoke<Snapshot>("start_focus", {
+      label,
+      confidential,
+      gapReason: gap_reason,
+      gapAsRest: gap_as_rest,
+      category,
+      planTaskId: plan_task_id ?? null,
+    }),
   pauseFocus: () => invoke<Snapshot>("pause_focus"),
   resumeFocus: (reason: PauseReason) => invoke<Snapshot>("resume_focus", { reason }),
   completeFocus: () => invoke<Snapshot>("complete_focus"),
@@ -136,6 +176,17 @@ export const api = {
     category: Category | null,
   ) => invoke<Snapshot>("add_manual_session", { startedAt, minutes, label, note, category }),
   closeDay: () => invoke<Snapshot>("close_day"),
+  buildPlanFromToday: () => invoke<Snapshot>("build_plan_from_today"),
+  addPlanTask: (section: PlanSection, title: string, estPomodoros: number | null) =>
+    invoke<Snapshot>("add_plan_task", { section, title, estPomodoros }),
+  removePlanTask: (taskId: string) => invoke<Snapshot>("remove_plan_task", { taskId }),
+  editPlanTask: (taskId: string, section: PlanSection | null, estPomodoros: number | null) =>
+    invoke<Snapshot>("edit_plan_task", { taskId, section, estPomodoros }),
+  setPlanTaskDone: (taskId: string, done: boolean) => invoke<Snapshot>("set_plan_task_done", { taskId, done }),
+  addMeeting: (title: string, startsAt: string | null, durationMin: number | null) =>
+    invoke<Snapshot>("add_meeting", { title, startsAt, durationMin }),
+  setMeetingHappened: (meetingId: string, happened: boolean) =>
+    invoke<Snapshot>("set_meeting_happened", { meetingId, happened }),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (s: Settings["timer"], autostart: boolean) =>
     invoke<Settings>("save_settings", {
@@ -185,6 +236,11 @@ export const BREAK_KIND_LABEL: Record<BreakKind, string> = {
 export function breakIcon(kind: BreakKind): string {
   return kind === "long" ? "☕" : kind === "bank" ? "🛌" : "💬";
 }
+
+export const PLAN_SECTION_LABEL: Record<PlanSection, string> = {
+  work: "работа",
+  personal: "личное",
+};
 
 export const PAUSE_REASON_LABEL: Record<PauseReason, string> = {
   internal: "сам отвлёкся",

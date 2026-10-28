@@ -10,13 +10,7 @@
 
 use serde::Serialize;
 
-/// Секция плана дня (PRD FR-14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanSection {
-    Work,
-    Personal,
-}
+use crate::wal::event::PlanSection;
 
 /// Задача, извлечённая из строки «☀️ Сегодня».
 #[derive(Debug, Clone, PartialEq, Serialize)]

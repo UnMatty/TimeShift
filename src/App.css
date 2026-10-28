@@ -266,6 +266,53 @@ button.danger {
   color: var(--ok);
 }
 
+/* --- план дня --- */
+
+.plan-header {
+  margin-top: 0;
+}
+
+.plan-header h3 {
+  margin: 0;
+}
+
+.plan-task {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 10px;
+}
+
+.plan-task.done {
+  opacity: 0.55;
+}
+
+.plan-task .s-title {
+  margin-bottom: 2px;
+}
+
+.plan-task > button {
+  padding: 4px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.est {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.est button {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
 /* --- сессии --- */
 
 .sessions {

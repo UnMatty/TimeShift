@@ -4,7 +4,7 @@
 //! `{"id": <uuid>, "ts": <RFC3339 с локальным смещением>, "type": "...", "payload": {...}}`
 //! Формат менять нельзя без согласования с Replicator (WP-4) и будущей миграцией WAL.
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,6 +27,54 @@ pub enum Category {
     Work,
     Personal,
     Meeting,
+}
+
+/// Секция плана дня (PRD FR-14): работа / личное. Встречи — отдельный список
+/// (`PlanMeeting`), не задача с оценкой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanSection {
+    Work,
+    Personal,
+}
+
+/// Задача плана дня: импортирована из «☀️ Сегодня» или добавлена вручную.
+/// `today_note_line` — точная строка заметки для обратной точечной замены
+/// чекбокса (привязка по тексту, не по номеру — ARCH §9).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanTask {
+    pub id: Uuid,
+    pub section: PlanSection,
+    pub title: String,
+    #[serde(default)]
+    pub wiki_links: Vec<String>,
+    #[serde(default)]
+    pub marker: Option<String>,
+    #[serde(default)]
+    pub today_note_line: Option<String>,
+    /// Оценка в помидорках (план, FR-16).
+    #[serde(default)]
+    pub est_pomodoros: Option<u32>,
+    /// Отмечена выполненной в приложении.
+    #[serde(default)]
+    pub done: bool,
+    /// Чекбокс в «☀️ Сегодня» проставлен синком (может отставать от `done`).
+    #[serde(default)]
+    pub today_note_done: bool,
+}
+
+/// Ручная запись о встрече дня (PRD FR-17).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanMeeting {
+    pub id: Uuid,
+    pub title: String,
+    #[serde(default)]
+    pub starts_at: Option<DateTime<Local>>,
+    #[serde(default)]
+    pub duration_min: Option<i64>,
+    /// Вечерняя отметка: состоялась (иначе перенесена/отменена).
+    #[serde(default)]
+    pub happened: bool,
 }
 
 /// Откуда сессия: таймер или ручная до-логировка (PRD FR-7).
@@ -71,11 +119,14 @@ pub struct SessionStarted {
     pub session_id: Uuid,
     pub planned_min: i64,
     pub source: SessionSource,
-    /// Свободная подпись задачи (привязка к плану дня появится в v0.2).
+    /// Свободная подпись задачи (для задач плана дублирует их заголовок).
     pub label: Option<String>,
     /// Тексты такой сессии не уходят в LLM-обзор (PRD FR-26, важно с v0.3).
     #[serde(default)]
     pub confidential: bool,
+    /// Задача плана дня, под которую стартовала помидорка (v0.2, FR-16).
+    #[serde(default)]
+    pub plan_task_id: Option<Uuid>,
 }
 
 /// Пауза фокуса. Причина приходит отдельным событием `pause_reason`
@@ -191,6 +242,72 @@ pub struct DayClosed {
     pub banked_min_at_close: i64,
 }
 
+// --- План дня (v0.2, PRD FR-14…FR-18) --------------------------------------
+
+/// Сборка/пересборка плана дня (импорт из «☀️ Сегодня» заменяет план целиком).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanBuilt {
+    pub day: NaiveDate,
+    pub tasks: Vec<PlanTask>,
+    /// Сырой текст «☀️ Сегодня» на момент сборки (аудит конфликтов, day_plans.today_note_snapshot).
+    #[serde(default)]
+    pub today_note_snapshot: Option<String>,
+}
+
+/// Ручное добавление задачи в план.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanTaskAdded {
+    pub task: PlanTask,
+}
+
+/// Удаление задачи из плана (саму строку «Сегодня» не трогаем — ARCH §5.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanTaskRemoved {
+    pub task_id: Uuid,
+}
+
+/// Правка задачи: раскладка по секциям и/или оценка в помидорках (FR-14, FR-16).
+/// `None` поля не меняются (двойные Option в JSON не переживают раундтрип WAL).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanTaskEdited {
+    pub task_id: Uuid,
+    #[serde(default)]
+    pub section: Option<PlanSection>,
+    #[serde(default)]
+    pub est_pomodoros: Option<u32>,
+}
+
+/// Отметка задачи в приложении (галочка в UI). Чекбокс в «Сегодня» проставляет
+/// vault-синк отдельным событием `PlanTaskSynced` (FR-18).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanTaskCompleted {
+    pub task_id: Uuid,
+    pub done: bool,
+}
+
+/// Факт синхронизации чекбокса с «☀️ Сегодня» (ok — совпало).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanTaskSynced {
+    pub task_id: Uuid,
+    pub today_note_done: bool,
+    /// Почему не получилось (конфликт: строка пересобрана агентом) — для аудита.
+    #[serde(default)]
+    pub conflict: Option<String>,
+}
+
+/// Ручная запись о встрече (FR-17).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeetingAdded {
+    pub meeting: PlanMeeting,
+}
+
+/// Вечерняя отметка встречи: состоялась / перенесена.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeetingHappened {
+    pub meeting_id: Uuid,
+    pub happened: bool,
+}
+
 /// Статус синхронизации с внешними системами (vault/БД); в v0.1 пишет Replicator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VaultSyncStatus {
@@ -218,6 +335,14 @@ pub enum Event {
     BreakEvent(BreakEvent),
     ManualSessionAdded(ManualSessionAdded),
     DayClosed(DayClosed),
+    PlanBuilt(PlanBuilt),
+    PlanTaskAdded(PlanTaskAdded),
+    PlanTaskRemoved(PlanTaskRemoved),
+    PlanTaskEdited(PlanTaskEdited),
+    PlanTaskCompleted(PlanTaskCompleted),
+    PlanTaskSynced(PlanTaskSynced),
+    MeetingAdded(MeetingAdded),
+    MeetingHappened(MeetingHappened),
     VaultSyncStatus(VaultSyncStatus),
 }
 
@@ -309,6 +434,46 @@ impl From<ManualSessionAdded> for Event {
 impl From<DayClosed> for Event {
     fn from(v: DayClosed) -> Self {
         Event::DayClosed(v)
+    }
+}
+impl From<PlanBuilt> for Event {
+    fn from(v: PlanBuilt) -> Self {
+        Event::PlanBuilt(v)
+    }
+}
+impl From<PlanTaskAdded> for Event {
+    fn from(v: PlanTaskAdded) -> Self {
+        Event::PlanTaskAdded(v)
+    }
+}
+impl From<PlanTaskRemoved> for Event {
+    fn from(v: PlanTaskRemoved) -> Self {
+        Event::PlanTaskRemoved(v)
+    }
+}
+impl From<PlanTaskEdited> for Event {
+    fn from(v: PlanTaskEdited) -> Self {
+        Event::PlanTaskEdited(v)
+    }
+}
+impl From<PlanTaskCompleted> for Event {
+    fn from(v: PlanTaskCompleted) -> Self {
+        Event::PlanTaskCompleted(v)
+    }
+}
+impl From<PlanTaskSynced> for Event {
+    fn from(v: PlanTaskSynced) -> Self {
+        Event::PlanTaskSynced(v)
+    }
+}
+impl From<MeetingAdded> for Event {
+    fn from(v: MeetingAdded) -> Self {
+        Event::MeetingAdded(v)
+    }
+}
+impl From<MeetingHappened> for Event {
+    fn from(v: MeetingHappened) -> Self {
+        Event::MeetingHappened(v)
     }
 }
 impl From<VaultSyncStatus> for Event {
