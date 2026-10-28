@@ -72,12 +72,16 @@ fn default_long() -> i64 { 15 }
 fn default_long_every() -> u32 { 4 }
 fn default_gap() -> i64 { 10 }
 
-/// Подготовка к v0.2: Local REST API плагина Obsidian.
+/// Доступ к хранилищу Obsidian через Local REST API (v0.2, ARCHITECTURE §3.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Default)]
 pub struct VaultConfig {
     #[serde(default)]
     pub api_url: Option<String>,
+    /// Bearer-ключ плагина. Прецедент — пароль БД в этом же конфиге; переезд
+    /// в Keychain — отдельным шагом по решению владельца.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 

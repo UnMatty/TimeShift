@@ -32,6 +32,8 @@ thiserror = "2"
 dirs = "6"
 tokio = { version = "1", default-features = false, features = ["time"] }
 toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+urlencoding = "2"
 sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls",

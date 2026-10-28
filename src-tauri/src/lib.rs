@@ -6,6 +6,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod timer;
+pub mod vault;
 pub mod wal;
 
 use std::time::Duration;
