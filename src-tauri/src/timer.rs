@@ -1047,11 +1047,7 @@ impl Timer {
             E::VaultSyncStatus(_) => {}
         }
         if ts.date_naive() > self.current_date {
-            self.current_date = ts.date_naive();
-            self.day_closed = false;
-            self.burned_bank_min = 0;
-            // План — дневные данные: в новый день собирается заново из «Сегодня».
-            self.plan = None;
+            self.open_new_day(ts.date_naive());
         }
     }
 
@@ -1111,11 +1107,20 @@ impl Timer {
         if let Some(events) = self.op_rollover_day() {
             return events;
         }
+        self.open_new_day(today);
+        Vec::new()
+    }
+
+    /// Дневные данные — сессии, разрывы, перерывы, план — в новый день не
+    /// переносятся: история остаётся в WAL и БД, состояние открывается чистым.
+    fn open_new_day(&mut self, today: NaiveDate) {
         self.current_date = today;
         self.day_closed = false;
         self.burned_bank_min = 0;
         self.plan = None;
-        Vec::new()
+        self.sessions = Vec::new();
+        self.gaps = Vec::new();
+        self.breaks = Vec::new();
     }
 
     /// События для обнаруженного разрыва (FR-4). Обычный ответ — одна запись

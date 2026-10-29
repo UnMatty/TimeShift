@@ -289,6 +289,48 @@ fn day_rollover_burns_bank() {
     assert!(t.tick_day_rollover(midnight + chrono::Duration::minutes(1)).is_empty());
 }
 
+/// Смена суток: дневные данные — сессии, разрывы, перерывы — в новый день
+/// не переносятся (и по событию сжигания банка, и по прямому пути).
+#[test]
+fn day_rollover_clears_daily_data() {
+    // Путь через событие: банк не пуст — DayClosed, дата двигается в fold.
+    let base = ts_at(2026, 10, 27, 23, 20);
+    let mut t = timer();
+    t.current_date = base.date_naive();
+    let events = t.op_start_focus(base, None, false, None, false, None, None).unwrap();
+    apply(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply(&mut t, done, events);
+    let events = t.op_skip_break(BreakAction::SkipToShort).unwrap();
+    apply(&mut t, done, events);
+    assert_eq!(t.sessions.len(), 1);
+    assert!(!t.breaks.is_empty());
+
+    let midnight = ts_at(2026, 10, 28, 0, 0);
+    let events = t.tick_day_rollover(midnight);
+    assert_eq!(events.len(), 1);
+    apply(&mut t, midnight, events);
+    assert!(t.sessions.is_empty(), "вчерашние сессии в новый день не переносятся");
+    assert!(t.gaps.is_empty());
+    assert!(t.breaks.is_empty());
+
+    // Прямой путь: банк и стрик пусты — без события, сброс тот же.
+    let evening = ts_at(2026, 10, 28, 22, 0);
+    let events = t
+        .op_add_manual_session(evening, 40, Some("блог".into()), None, None)
+        .unwrap();
+    apply(&mut t, evening, events);
+    assert_eq!(t.sessions.len(), 1);
+    let midnight2 = ts_at(2026, 10, 29, 0, 0);
+    assert!(
+        t.tick_day_rollover(midnight2).is_empty(),
+        "банк и стрик пусты — событие не нужно"
+    );
+    assert!(t.sessions.is_empty());
+    assert_eq!(t.current_date, midnight2.date_naive());
+}
+
 /// «Отдохнуть весь банк» (v0.1.1): перерыв длительностью в банк, банк обнулён;
 /// при пустом банке операция запрещена.
 #[test]
@@ -376,6 +418,8 @@ fn gap_as_rest_spends_bank_and_logs_remainder() {
 fn day_close_is_once_per_day() {
     let base = ts_at(2026, 10, 28, 9, 0);
     let mut t = timer();
+    // Таймер создаётся с реальной сегодняшней датой — фиксируем дату начала.
+    t.current_date = base.date_naive();
     let events = t.op_start_focus(base, None, false, None, false, None, None).unwrap();
     apply(&mut t, base, events);
     let done = base + chrono::Duration::minutes(25);
@@ -437,6 +481,8 @@ fn plan_lifecycle() {
     use crate::wal::event::{PlanSection, PlanTask};
     let base = ts_at(2026, 10, 28, 9, 0);
     let mut t = timer();
+    // Таймер создаётся с реальной сегодняшней датой — фиксируем дату начала.
+    t.current_date = base.date_naive();
     let day = base.date_naive();
 
     // До сборки плана операции запрещены.

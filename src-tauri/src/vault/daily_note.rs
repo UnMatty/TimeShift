@@ -251,6 +251,8 @@ mod tests {
     fn snap_with_day() -> Snapshot {
         let mut t = Timer::new(crate::config::TimerConfig::default());
         let base = Local.with_ymd_and_hms(2026, 10, 28, 9, 0, 0).single().expect("время");
+        // Таймер создаётся с реальной сегодняшней датой — фиксируем дату начала.
+        t.current_date = base.date_naive();
         let task = PlanTask {
             id: Uuid::new_v4(),
             section: PlanSection::Work,
