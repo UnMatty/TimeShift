@@ -1,4 +1,5 @@
-// TimeShift UI v0.1 (WP-5): экраны «День», «Парковка», «Настройки».
+// TimeShift UI: экраны «День», «План», «Парковка», «Настройки» (v0.3 «Модули»:
+// хранилище — файлы/SQLite/Postgres, Obsidian — подключаемый модуль).
 // Все операции идут через api.ts; состояние приходит событием tick из Rust.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -15,7 +16,7 @@ import {
   fmtClock,
   fmtTime,
 } from "./api";
-import type { Category, PauseReason, PlanSection, Settings, Snapshot, UiSession } from "./api";
+import type { Category, DbBackend, PauseReason, PlanSection, Settings, Snapshot, UiSession } from "./api";
 import "./App.css";
 
 type Tab = "day" | "plan" | "parking" | "settings";
@@ -112,16 +113,26 @@ export default function App() {
 
 // ---------------------------------------------------------------------------
 
+/// Статус хранилища в шапке. Бэкенд «none» — это норма (всё в локальном
+/// журнале), не офлайн; при реплике опрашиваем её состояние раз в 10 с.
 function DbStatus() {
+  const [backend, setBackend] = useState<DbBackend | null>(null);
   const [online, setOnline] = useState<boolean | null>(null);
   useEffect(() => {
+    void api.getSettings().then((s) => setBackend(s.db_backend)).catch(() => setBackend(null));
+  }, []);
+  useEffect(() => {
+    if (backend === null || backend === "none") return;
     void api.dbStatus().then(setOnline).catch(() => setOnline(false));
     const t = setInterval(() => void api.dbStatus().then(setOnline).catch(() => setOnline(false)), 10_000);
     return () => clearInterval(t);
-  }, []);
+  }, [backend]);
+  if (backend === null) return <span className="db">…</span>;
+  if (backend === "none") return <span className="db online">Хранение: локальный журнал</span>;
+  const label = backend === "sqlite" ? "SQLite" : "БД";
   return (
     <span className={online ? "db online" : "db offline"}>
-      {online === null ? "…" : online ? "БД онлайн" : "БД офлайн — журнал копится"}
+      {online === null ? "…" : online ? `${label} онлайн` : `${label} офлайн — журнал копится`}
     </span>
   );
 }
@@ -636,12 +647,17 @@ function PlanTab({
   run: (fn: (gapReason?: string, asRest?: boolean) => Promise<Snapshot>) => Promise<void>;
 }) {
   const plan = snap.plan;
+  const [vaultActive, setVaultActive] = useState<boolean | null>(null);
   const [newSection, setNewSection] = useState<PlanSection>("work");
   const [newTitle, setNewTitle] = useState("");
   const [newEst, setNewEst] = useState("");
   const [mTitle, setMTitle] = useState("");
   const [mTime, setMTime] = useState("");
   const [mMin, setMMin] = useState("");
+  useEffect(() => {
+    // Модуль Obsidian не активен — импорта нет, план ведётся вручную (v0.3).
+    void api.getSettings().then((s) => setVaultActive(s.vault_active)).catch(() => setVaultActive(false));
+  }, []);
 
   const startTask = (taskId: string) =>
     void run((gr, asRest) => api.startFocus(null, false, gr ?? null, asRest ?? false, null, taskId));
@@ -654,15 +670,17 @@ function PlanTab({
           <h3 className="grow">
             План дня{plan && <span className="muted"> на {plan.day}</span>}
           </h3>
-          <button className="primary" onClick={() => void run(() => api.buildPlanFromToday())}>
-            ⟳ Собрать из «☀️ Сегодня»
-          </button>
+          {vaultActive && (
+            <button className="primary" onClick={() => void run(() => api.buildPlanFromToday())}>
+              ⟳ Собрать из «☀️ Сегодня»
+            </button>
+          )}
         </div>
         {!plan && (
           <p className="muted">
-            План не собран. Импорт возьмёт все чекбоксы из «☀️ Сегодня» (секции «Встречи» и «Дедлайны» — мимо),
-            раскладку по «работа/личное» и оценки в помидорках правишь здесь. Пересборка заменяет задачи,
-            встречи и отметки остаются.
+            {vaultActive === false
+              ? "План не собран. Модуль Obsidian не подключён — добавляй задачи и встречи руками ниже, для таймера и факта этого достаточно. Подключить импорт можно в «Настройках»."
+              : "План не собран. Импорт возьмёт все чекбоксы из «☀️ Сегодня» (секции «Встречи» и «Дедлайны» — мимо), раскладку по «работа/личное» и оценки в помидорках правишь здесь. Пересборка заменяет задачи, встречи и отметки остаются."}
           </p>
         )}
       </section>
@@ -909,6 +927,12 @@ function ParkingTab({ snap, run }: { snap: Snapshot; run: (fn: (gapReason?: stri
 // Настройки
 // ---------------------------------------------------------------------------
 
+const BACKEND_LABEL: Record<DbBackend, string> = {
+  none: "только журнал (файлы)",
+  sqlite: "SQLite (локальный файл)",
+  postgres: "Postgres (Docker-контейнер)",
+};
+
 function SettingsTab() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saved, setSaved] = useState(false);
@@ -935,43 +959,132 @@ function SettingsTab() {
   );
 
   return (
-    <section className="card">
-      <h3>Таймер</h3>
-      <p className="muted">Классика 25/5/15, длинный после 4 помидорок. Меняется только здесь.</p>
-      <div className="grid">
-        {num("focus_min", "фокус, мин")}
-        {num("short_break_min", "короткий перерыв, мин")}
-        {num("long_break_min", "длинный перерыв, мин")}
-        {num("long_every", "длинный после N помидорок")}
-        {num("gap_threshold_min", "порог разрыва, мин")}
-      </div>
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={settings.autostart}
-          onChange={(e) => {
-            setSettings({ ...settings, autostart: e.currentTarget.checked });
-            setSaved(false);
-          }}
-        />
-        запускать вместе с macOS
-      </label>
-      <div className="row">
-        <button
-          className="primary"
-          onClick={() => void api.saveSettings(t, settings.autostart).then((s) => {
-            setSettings(s);
-            setSaved(true);
-          })}
-        >
-          Сохранить
-        </button>
-        {saved && <span className="muted">сохранено</span>}
-      </div>
-      <p className="muted">
-        БД: {settings.db_online ? "онлайн" : "офлайн — события копятся в ~/.timeshift/wal и дореплицируются"}.
-        Секреты — в ~/.timeshift/config.toml, в приложение не встроены.
-      </p>
-    </section>
+    <>
+      <section className="card">
+        <h3>Таймер</h3>
+        <p className="muted">Классика 25/5/15, длинный после 4 помидорок. Меняется только здесь.</p>
+        <div className="grid">
+          {num("focus_min", "фокус, мин")}
+          {num("short_break_min", "короткий перерыв, мин")}
+          {num("long_break_min", "длинный перерыв, мин")}
+          {num("long_every", "длинный после N помидорок")}
+          {num("gap_threshold_min", "порог разрыва, мин")}
+        </div>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={settings.autostart}
+            onChange={(e) => {
+              setSettings({ ...settings, autostart: e.currentTarget.checked });
+              setSaved(false);
+            }}
+          />
+          запускать вместе с macOS
+        </label>
+        <div className="row">
+          <button
+            className="primary"
+            onClick={() => void api.saveSettings(settings).then((s) => {
+              setSettings(s);
+              setSaved(true);
+            })}
+          >
+            Сохранить
+          </button>
+          {saved && <span className="muted">сохранено</span>}
+        </div>
+      </section>
+
+      <section className="card">
+        <h3>Модули</h3>
+        <p className="muted">
+          Журнал в ~/.timeshift/wal — источник истины всегда. Реплика и Obsidian — подключаемые модули:
+          без них приложение работает как на чистых файлах. Изменение хранилища применяется после
+          перезапуска, Obsidian подхватывается сразу.
+        </p>
+        <label className="setting">
+          <span>хранилище-реплика</span>
+          <select
+            value={settings.db_backend}
+            onChange={(e) => {
+              setSettings({ ...settings, db_backend: e.currentTarget.value as DbBackend });
+              setSaved(false);
+            }}
+          >
+            {(Object.keys(BACKEND_LABEL) as DbBackend[]).map((k) => (
+              <option key={k} value={k}>
+                {BACKEND_LABEL[k]}
+              </option>
+            ))}
+          </select>
+        </label>
+        {settings.db_backend !== "none" && (
+          <label className="setting">
+            <span>{settings.db_backend === "sqlite" ? "путь к файлу SQLite" : "строка подключения Postgres"}</span>
+            <input
+              type="text"
+              placeholder={
+                settings.db_backend === "sqlite"
+                  ? "~/.timeshift/timeshift.db (по умолчанию)"
+                  : "postgresql://timeshift@localhost:5432/timeshift"
+              }
+              value={settings.db_url ?? ""}
+              onChange={(e) => {
+                setSettings({ ...settings, db_url: e.currentTarget.value });
+                setSaved(false);
+              }}
+            />
+          </label>
+        )}
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={settings.vault_enabled}
+            onChange={(e) => {
+              setSettings({ ...settings, vault_enabled: e.currentTarget.checked });
+              setSaved(false);
+            }}
+          />
+          модуль Obsidian — план из «☀️ Сегодня», синк чекбоксов, фокус-логи
+        </label>
+        {settings.vault_enabled && (
+          <>
+            <label className="setting">
+              <span>Local REST API (URL)</span>
+              <input
+                type="text"
+                placeholder="https://127.0.0.1:27124"
+                value={settings.vault_api_url ?? ""}
+                onChange={(e) => {
+                  setSettings({ ...settings, vault_api_url: e.currentTarget.value });
+                  setSaved(false);
+                }}
+              />
+            </label>
+            <label className="setting">
+              <span>ключ плагина</span>
+              <input
+                type="password"
+                value={settings.vault_api_key ?? ""}
+                onChange={(e) => {
+                  setSettings({ ...settings, vault_api_key: e.currentTarget.value });
+                  setSaved(false);
+                }}
+              />
+            </label>
+            {!settings.vault_active && (
+              <p className="muted small">нужны и URL, и ключ — иначе модуль считается неактивным</p>
+            )}
+          </>
+        )}
+        <p className="muted">
+          {settings.db_backend === "none"
+            ? "Хранение — локальный журнал, реплики нет."
+            : `${BACKEND_LABEL[settings.db_backend]}: ${settings.db_online ? "онлайн" : "офлайн — события копятся и дореплицируются"}.`}
+          {settings.vault_active ? " Obsidian подключён." : " Obsidian не подключён — план ведётся вручную."}
+          Секреты — в ~/.timeshift/config.toml, в приложение не встроены.
+        </p>
+      </section>
+    </>
   );
 }

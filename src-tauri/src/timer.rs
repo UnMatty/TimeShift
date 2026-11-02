@@ -271,7 +271,10 @@ impl Timer {
             // «Весь банк» не предлагается сам — только по явной команде.
             BreakKind::Bank => 0,
         };
-        Some(ProposedBreak { kind, duration_min: base + extra })
+        Some(ProposedBreak {
+            kind,
+            duration_min: base + extra,
+        })
     }
 
     /// Снимок для UI/трея. `now` передаётся снаружи — тик и тесты управляют временем.
@@ -280,7 +283,9 @@ impl Timer {
             Phase::Idle => PhaseView::Idle,
             Phase::Focus(f) => {
                 let elapsed = f.focus_secs
-                    + f.seg_start.map(|s| (now - s).num_seconds().max(0)).unwrap_or(0);
+                    + f.seg_start
+                        .map(|s| (now - s).num_seconds().max(0))
+                        .unwrap_or(0);
                 PhaseView::Focus {
                     session_id: f.session_id,
                     label: f.label.clone(),
@@ -288,8 +293,7 @@ impl Timer {
                     elapsed_secs: elapsed,
                     paused: f.seg_start.is_none(),
                     confidential: f.confidential,
-                    pauses: self
-                        .current_session_pauses(f.session_id),
+                    pauses: self.current_session_pauses(f.session_id),
                 }
             }
             Phase::Break(b) => {
@@ -407,17 +411,25 @@ impl Timer {
             events.extend(self.gap_events(gap, gap_as_rest));
         }
         let session_id = Uuid::new_v4();
-        events.push(SessionStarted {
-            session_id,
-            planned_min: self.cfg.focus_min,
-            source: SessionSource::Timer,
-            label: label.filter(|l| !l.trim().is_empty()),
-            confidential,
-            plan_task_id,
-        }
-        .into());
+        events.push(
+            SessionStarted {
+                session_id,
+                planned_min: self.cfg.focus_min,
+                source: SessionSource::Timer,
+                label: label.filter(|l| !l.trim().is_empty()),
+                confidential,
+                plan_task_id,
+            }
+            .into(),
+        );
         if let Some(category) = category {
-            events.push(CategorySet { session_id, category }.into());
+            events.push(
+                CategorySet {
+                    session_id,
+                    category,
+                }
+                .into(),
+            );
         }
         Ok(events)
     }
@@ -436,9 +448,10 @@ impl Timer {
         if let Some(gap) = self.detect_gap(now, gap_reason)? {
             events.extend(self.gap_events(gap, gap_as_rest));
         }
-        let proposed = self
-            .proposed_break()
-            .unwrap_or(ProposedBreak { kind: BreakKind::Short, duration_min: self.cfg.short_break_min });
+        let proposed = self.proposed_break().unwrap_or(ProposedBreak {
+            kind: BreakKind::Short,
+            duration_min: self.cfg.short_break_min,
+        });
         let banked_after = self.bank_min()
             - match proposed.kind {
                 BreakKind::Short => self.short_extra_min,
@@ -493,7 +506,9 @@ impl Timer {
     /// Пропуск перерыва с выбором, куда прибавить его минуты (PRD FR-5).
     pub fn op_skip_break(&self, action: BreakAction) -> Result<Vec<Event>, OpError> {
         if !matches!(self.phase, Phase::Idle) {
-            return Err(OpError::InvalidState("перерыв пропускается, когда этапа нет".into()));
+            return Err(OpError::InvalidState(
+                "перерыв пропускается, когда этапа нет".into(),
+            ));
         }
         let proposed = self
             .proposed_break()
@@ -509,24 +524,34 @@ impl Timer {
             BreakAction::SkipPlain => self.bank_min(),
             BreakAction::Taken => return Err(OpError::InvalidState("taken — не пропуск".into())),
         };
-        Ok(vec![BreakEvent {
-            kind: proposed.kind,
-            action,
-            banked_min: banked_after,
-            duration_min: 0,
-            spend_min: None,
-        }
-        .into()])
+        Ok(vec![
+            BreakEvent {
+                kind: proposed.kind,
+                action,
+                banked_min: banked_after,
+                duration_min: 0,
+                spend_min: None,
+            }
+            .into(),
+        ])
     }
 
     pub fn op_pause_focus(&self) -> Result<Vec<Event>, OpError> {
         let Phase::Focus(f) = &self.phase else {
-            return Err(OpError::InvalidState("пауза — только во время фокуса".into()));
+            return Err(OpError::InvalidState(
+                "пауза — только во время фокуса".into(),
+            ));
         };
         if f.seg_start.is_none() {
             return Err(OpError::InvalidState("фокус уже на паузе".into()));
         }
-        Ok(vec![SessionPaused { session_id: f.session_id, pause_id: Uuid::new_v4() }.into()])
+        Ok(vec![
+            SessionPaused {
+                session_id: f.session_id,
+                pause_id: Uuid::new_v4(),
+            }
+            .into(),
+        ])
     }
 
     /// Возобновление с причиной паузы (PRD FR-3): два события — ответ и само продолжение.
@@ -538,8 +563,16 @@ impl Timer {
             return Err(OpError::InvalidState("фокус не на паузе".into()));
         };
         Ok(vec![
-            PauseReasonEvent { session_id: f.session_id, pause_id, reason }.into(),
-            SessionResumed { session_id: f.session_id }.into(),
+            PauseReasonEvent {
+                session_id: f.session_id,
+                pause_id,
+                reason,
+            }
+            .into(),
+            SessionResumed {
+                session_id: f.session_id,
+            }
+            .into(),
         ])
     }
 
@@ -549,7 +582,13 @@ impl Timer {
             return Err(OpError::InvalidState("фокус не идёт".into()));
         };
         let actual_min = round_up_min(self.focus_total_secs(f, now));
-        Ok(vec![SessionCompleted { session_id: f.session_id, actual_min }.into()])
+        Ok(vec![
+            SessionCompleted {
+                session_id: f.session_id,
+                actual_min,
+            }
+            .into(),
+        ])
     }
 
     /// Аннулирование (PRD FR-6): фиксируется отдельно, в стрик не идёт.
@@ -557,7 +596,13 @@ impl Timer {
         let Phase::Focus(f) = &self.phase else {
             return Err(OpError::InvalidState("фокус не идёт".into()));
         };
-        Ok(vec![SessionVoided { session_id: f.session_id, reason }.into()])
+        Ok(vec![
+            SessionVoided {
+                session_id: f.session_id,
+                reason,
+            }
+            .into(),
+        ])
     }
 
     /// Разорвать перерыв досрочно. Состояние локальное — без события.
@@ -575,10 +620,20 @@ impl Timer {
         if text.is_empty() {
             return Err(OpError::InvalidState("пустая мысль".into()));
         }
-        Ok(vec![ThoughtParked { thought_id: Uuid::new_v4(), text }.into()])
+        Ok(vec![
+            ThoughtParked {
+                thought_id: Uuid::new_v4(),
+                text,
+            }
+            .into(),
+        ])
     }
 
-    pub fn op_resolve_thought(&self, thought_id: Uuid, resolution: ThoughtResolution) -> Result<Vec<Event>, OpError> {
+    pub fn op_resolve_thought(
+        &self,
+        thought_id: Uuid,
+        resolution: ThoughtResolution,
+    ) -> Result<Vec<Event>, OpError> {
         let thought = self
             .thoughts
             .iter()
@@ -587,7 +642,13 @@ impl Timer {
         if thought.resolved {
             return Err(OpError::InvalidState("мысль уже разобрана".into()));
         }
-        Ok(vec![ThoughtResolved { thought_id, resolution }.into()])
+        Ok(vec![
+            ThoughtResolved {
+                thought_id,
+                resolution,
+            }
+            .into(),
+        ])
     }
 
     pub fn op_set_note(&self, session_id: Uuid, note: String) -> Result<Vec<Event>, OpError> {
@@ -597,11 +658,21 @@ impl Timer {
         Ok(vec![NoteEdited { session_id, note }.into()])
     }
 
-    pub fn op_set_category(&self, session_id: Uuid, category: Category) -> Result<Vec<Event>, OpError> {
+    pub fn op_set_category(
+        &self,
+        session_id: Uuid,
+        category: Category,
+    ) -> Result<Vec<Event>, OpError> {
         if !self.sessions.iter().any(|s| s.id == session_id) {
             return Err(OpError::UnknownSession);
         }
-        Ok(vec![CategorySet { session_id, category }.into()])
+        Ok(vec![
+            CategorySet {
+                session_id,
+                category,
+            }
+            .into(),
+        ])
     }
 
     // -----------------------------------------------------------------------
@@ -617,16 +688,30 @@ impl Timer {
         today_note_snapshot: Option<String>,
     ) -> Result<Vec<Event>, OpError> {
         if day != self.current_date {
-            return Err(OpError::InvalidState("план собирается на сегодняшний день".into()));
+            return Err(OpError::InvalidState(
+                "план собирается на сегодняшний день".into(),
+            ));
         }
-        Ok(vec![PlanBuilt { day, tasks, today_note_snapshot }.into()])
+        Ok(vec![
+            PlanBuilt {
+                day,
+                tasks,
+                today_note_snapshot,
+            }
+            .into(),
+        ])
     }
 
     fn require_plan(&self) -> Result<(), OpError> {
-        self.plan.as_ref().map(|_| ()).ok_or_else(|| OpError::InvalidState("план дня ещё не собран".into()))
+        self.plan
+            .as_ref()
+            .map(|_| ())
+            .ok_or_else(|| OpError::InvalidState("план дня ещё не собран".into()))
     }
 
-    /// Ручное добавление задачи в план.
+    /// Ручное добавление задачи в план. Если плана ещё нет (нет Obsidian или
+    /// импорт не запускался — v0.3 «Модули»), первой задачей создаётся
+    /// пустой план: мульти-событийные ops — норма (см. CategorySet).
     pub fn op_add_plan_task(
         &self,
         section: PlanSection,
@@ -637,25 +722,41 @@ impl Timer {
         if title.is_empty() {
             return Err(OpError::InvalidState("пустая задача".into()));
         }
-        self.require_plan()?;
-        Ok(vec![PlanTaskAdded {
-            task: PlanTask {
-                id: Uuid::new_v4(),
-                section,
-                title,
-                wiki_links: Vec::new(),
-                marker: None,
-                today_note_line: None,
-                est_pomodoros,
-                done: false,
-                today_note_done: false,
-            },
+        let mut events = Vec::new();
+        if self.plan.is_none() {
+            events.push(
+                PlanBuilt {
+                    day: self.current_date,
+                    tasks: Vec::new(),
+                    today_note_snapshot: None,
+                }
+                .into(),
+            );
         }
-        .into()])
+        events.push(
+            PlanTaskAdded {
+                task: PlanTask {
+                    id: Uuid::new_v4(),
+                    section,
+                    title,
+                    wiki_links: Vec::new(),
+                    marker: None,
+                    today_note_line: None,
+                    est_pomodoros,
+                    done: false,
+                    today_note_done: false,
+                },
+            }
+            .into(),
+        );
+        Ok(events)
     }
 
     pub fn op_remove_plan_task(&self, task_id: Uuid) -> Result<Vec<Event>, OpError> {
-        let known = self.plan.as_ref().is_some_and(|p| p.tasks.iter().any(|t| t.id == task_id));
+        let known = self
+            .plan
+            .as_ref()
+            .is_some_and(|p| p.tasks.iter().any(|t| t.id == task_id));
         if !known {
             return Err(OpError::InvalidState("задача плана не найдена".into()));
         }
@@ -669,14 +770,24 @@ impl Timer {
         section: Option<PlanSection>,
         est_pomodoros: Option<u32>,
     ) -> Result<Vec<Event>, OpError> {
-        let known = self.plan.as_ref().is_some_and(|p| p.tasks.iter().any(|t| t.id == task_id));
+        let known = self
+            .plan
+            .as_ref()
+            .is_some_and(|p| p.tasks.iter().any(|t| t.id == task_id));
         if !known {
             return Err(OpError::InvalidState("задача плана не найдена".into()));
         }
         if section.is_none() && est_pomodoros.is_none() {
             return Ok(Vec::new());
         }
-        Ok(vec![PlanTaskEdited { task_id, section, est_pomodoros }.into()])
+        Ok(vec![
+            PlanTaskEdited {
+                task_id,
+                section,
+                est_pomodoros,
+            }
+            .into(),
+        ])
     }
 
     /// Отметка выполненной в приложении; чекбокс догонит через vault-синк.
@@ -700,10 +811,17 @@ impl Timer {
         conflict: Option<String>,
     ) -> Result<Vec<Event>, OpError> {
         self.require_plan()?;
-        Ok(vec![PlanTaskSynced { task_id, today_note_done, conflict }.into()])
+        Ok(vec![
+            PlanTaskSynced {
+                task_id,
+                today_note_done,
+                conflict,
+            }
+            .into(),
+        ])
     }
 
-    /// Ручная встреча дня (FR-17).
+    /// Ручная встреча дня (FR-17); без плана создаёт его (v0.3 «Модули»).
     pub fn op_add_meeting(
         &self,
         title: String,
@@ -714,20 +832,52 @@ impl Timer {
         if title.is_empty() {
             return Err(OpError::InvalidState("пустая тема встречи".into()));
         }
-        self.require_plan()?;
-        Ok(vec![MeetingAdded {
-            meeting: PlanMeeting { id: Uuid::new_v4(), title, starts_at, duration_min, happened: false },
+        let mut events = Vec::new();
+        if self.plan.is_none() {
+            events.push(
+                PlanBuilt {
+                    day: self.current_date,
+                    tasks: Vec::new(),
+                    today_note_snapshot: None,
+                }
+                .into(),
+            );
         }
-        .into()])
+        events.push(
+            MeetingAdded {
+                meeting: PlanMeeting {
+                    id: Uuid::new_v4(),
+                    title,
+                    starts_at,
+                    duration_min,
+                    happened: false,
+                },
+            }
+            .into(),
+        );
+        Ok(events)
     }
 
     /// Вечерняя отметка: состоялась / перенесена.
-    pub fn op_set_meeting_happened(&self, meeting_id: Uuid, happened: bool) -> Result<Vec<Event>, OpError> {
-        let known = self.plan.as_ref().is_some_and(|p| p.meetings.iter().any(|m| m.id == meeting_id));
+    pub fn op_set_meeting_happened(
+        &self,
+        meeting_id: Uuid,
+        happened: bool,
+    ) -> Result<Vec<Event>, OpError> {
+        let known = self
+            .plan
+            .as_ref()
+            .is_some_and(|p| p.meetings.iter().any(|m| m.id == meeting_id));
         if !known {
             return Err(OpError::InvalidState("встреча не найдена".into()));
         }
-        Ok(vec![MeetingHappened { meeting_id, happened }.into()])
+        Ok(vec![
+            MeetingHappened {
+                meeting_id,
+                happened,
+            }
+            .into(),
+        ])
     }
 
     /// Ручная до-логировка «работал без приложения» (PRD FR-7).
@@ -740,19 +890,23 @@ impl Timer {
         category: Option<Category>,
     ) -> Result<Vec<Event>, OpError> {
         if actual_min <= 0 {
-            return Err(OpError::InvalidState("длительность должна быть больше нуля".into()));
+            return Err(OpError::InvalidState(
+                "длительность должна быть больше нуля".into(),
+            ));
         }
         let ended_at = started_at + chrono::Duration::minutes(actual_min);
-        Ok(vec![ManualSessionAdded {
-            session_id: Uuid::new_v4(),
-            started_at,
-            ended_at,
-            actual_min,
-            label: label.filter(|l| !l.trim().is_empty()),
-            note: note.filter(|n| !n.trim().is_empty()),
-            category,
-        }
-        .into()])
+        Ok(vec![
+            ManualSessionAdded {
+                session_id: Uuid::new_v4(),
+                started_at,
+                ended_at,
+                actual_min,
+                label: label.filter(|l| !l.trim().is_empty()),
+                note: note.filter(|n| !n.trim().is_empty()),
+                category,
+            }
+            .into(),
+        ])
     }
 
     /// «Завершить день» (v0.1-часть, PRD FR-5): банк сгорает, стрик обнуляется.
@@ -764,7 +918,13 @@ impl Timer {
             return Err(OpError::InvalidState("день уже закрыт".into()));
         }
         let bank = self.bank_min();
-        Ok(vec![DayClosed { burned_min: bank, banked_min_at_close: bank }.into()])
+        Ok(vec![
+            DayClosed {
+                burned_min: bank,
+                banked_min_at_close: bank,
+            }
+            .into(),
+        ])
     }
 
     /// Смена суток (тик в полночь): сгоревший банк фиксируется событием.
@@ -773,7 +933,13 @@ impl Timer {
             return None;
         }
         let bank = self.bank_min();
-        Some(vec![DayClosed { burned_min: bank, banked_min_at_close: bank }.into()])
+        Some(vec![
+            DayClosed {
+                burned_min: bank,
+                banked_min_at_close: bank,
+            }
+            .into(),
+        ])
     }
 
     // -----------------------------------------------------------------------
@@ -818,28 +984,35 @@ impl Timer {
             }
             E::SessionPaused(e) => {
                 if let Phase::Focus(f) = &mut self.phase
-                    && f.session_id == e.session_id {
-                        f.focus_secs += seg_secs(f, ts);
-                        f.seg_start = None;
-                        f.open_pause_id = Some(e.pause_id);
-                    }
+                    && f.session_id == e.session_id
+                {
+                    f.focus_secs += seg_secs(f, ts);
+                    f.seg_start = None;
+                    f.open_pause_id = Some(e.pause_id);
+                }
                 if let Some(s) = session_mut(&mut self.sessions, e.session_id) {
                     s.status = SessionStatus::Paused;
-                    s.pauses.push(UiPause { started_at: ts, ended_at: None, reason: None });
+                    s.pauses.push(UiPause {
+                        started_at: ts,
+                        ended_at: None,
+                        reason: None,
+                    });
                 }
             }
             E::PauseReason(e) => {
                 if let Some(s) = session_mut(&mut self.sessions, e.session_id)
-                    && let Some(open) = s.pauses.iter_mut().rev().find(|p| p.ended_at.is_none()) {
-                        open.reason = Some(e.reason);
-                    }
+                    && let Some(open) = s.pauses.iter_mut().rev().find(|p| p.ended_at.is_none())
+                {
+                    open.reason = Some(e.reason);
+                }
             }
             E::SessionResumed(e) => {
                 if let Phase::Focus(f) = &mut self.phase
-                    && f.session_id == e.session_id {
-                        f.seg_start = Some(ts);
-                        f.open_pause_id = None;
-                    }
+                    && f.session_id == e.session_id
+                {
+                    f.seg_start = Some(ts);
+                    f.open_pause_id = None;
+                }
                 if let Some(s) = session_mut(&mut self.sessions, e.session_id) {
                     s.status = SessionStatus::Running;
                     if let Some(open) = s.pauses.iter_mut().rev().find(|p| p.ended_at.is_none()) {
@@ -849,10 +1022,11 @@ impl Timer {
             }
             E::SessionCompleted(e) => {
                 if let Phase::Focus(f) = &mut self.phase
-                    && f.session_id == e.session_id {
-                        f.focus_secs += seg_secs(f, ts);
-                        f.seg_start = None;
-                    }
+                    && f.session_id == e.session_id
+                {
+                    f.focus_secs += seg_secs(f, ts);
+                    f.seg_start = None;
+                }
                 if let Some(s) = session_mut(&mut self.sessions, e.session_id) {
                     s.actual_min = Some(e.actual_min);
                     s.ended_at = Some(ts);
@@ -869,10 +1043,11 @@ impl Timer {
             }
             E::SessionVoided(e) => {
                 if let Phase::Focus(f) = &mut self.phase
-                    && f.session_id == e.session_id {
-                        f.focus_secs += seg_secs(f, ts);
-                        f.seg_start = None;
-                    }
+                    && f.session_id == e.session_id
+                {
+                    f.focus_secs += seg_secs(f, ts);
+                    f.seg_start = None;
+                }
                 if let Some(s) = session_mut(&mut self.sessions, e.session_id) {
                     s.ended_at = Some(ts);
                     s.status = SessionStatus::Void;
@@ -922,7 +1097,8 @@ impl Timer {
                             Some(spend) => {
                                 let from_long = spend.min(self.long_extra_min);
                                 self.long_extra_min -= from_long;
-                                self.short_extra_min -= (spend - from_long).min(self.short_extra_min);
+                                self.short_extra_min -=
+                                    (spend - from_long).min(self.short_extra_min);
                             }
                             // Длительность уже включает банк этого вида — банк потреблён.
                             None => match e.kind {
@@ -937,7 +1113,11 @@ impl Timer {
                         self.phase = Phase::Break(BreakPhase {
                             kind: e.kind,
                             started_at: ts,
-                            duration_min: if e.duration_min > 0 { e.duration_min } else { offered_base },
+                            duration_min: if e.duration_min > 0 {
+                                e.duration_min
+                            } else {
+                                offered_base
+                            },
                         });
                     }
                     BreakAction::SkipToShort => self.short_extra_min += offered_base,
@@ -983,13 +1163,18 @@ impl Timer {
                     Some(existing) if existing.day == e.day => existing.meetings.clone(),
                     _ => Vec::new(),
                 };
-                self.plan = Some(DayPlan { day: e.day, tasks: e.tasks, meetings });
+                self.plan = Some(DayPlan {
+                    day: e.day,
+                    tasks: e.tasks,
+                    meetings,
+                });
             }
             E::PlanTaskAdded(e) => {
                 if let Some(plan) = &mut self.plan
-                    && !plan.tasks.iter().any(|t| t.id == e.task.id) {
-                        plan.tasks.push(e.task);
-                    }
+                    && !plan.tasks.iter().any(|t| t.id == e.task.id)
+                {
+                    plan.tasks.push(e.task);
+                }
             }
             E::PlanTaskRemoved(e) => {
                 if let Some(plan) = &mut self.plan {
@@ -1031,9 +1216,10 @@ impl Timer {
             }
             E::MeetingAdded(e) => {
                 if let Some(plan) = &mut self.plan
-                    && !plan.meetings.iter().any(|m| m.id == e.meeting.id) {
-                        plan.meetings.push(e.meeting);
-                    }
+                    && !plan.meetings.iter().any(|m| m.id == e.meeting.id)
+                {
+                    plan.meetings.push(e.meeting);
+                }
             }
             E::MeetingHappened(e) => {
                 if let Some(meeting) = self
@@ -1062,7 +1248,9 @@ impl Timer {
         now: DateTime<Local>,
         gap_reason: Option<String>,
     ) -> Result<Option<GapWindow>, OpError> {
-        let Some(end) = self.last_stage_end else { return Ok(None) };
+        let Some(end) = self.last_stage_end else {
+            return Ok(None);
+        };
         let minutes = (now - end).num_minutes();
         if minutes < self.cfg.gap_threshold_min {
             return Ok(None);
@@ -1074,7 +1262,10 @@ impl Timer {
     }
 
     fn focus_total_secs(&self, f: &FocusPhase, now: DateTime<Local>) -> i64 {
-        f.focus_secs + f.seg_start.map(|s| (now - s).num_seconds().max(0)).unwrap_or(0)
+        f.focus_secs
+            + f.seg_start
+                .map(|s| (now - s).num_seconds().max(0))
+                .unwrap_or(0)
     }
 
     /// Естественное завершение по тику. Возвращает события (может быть пусто).
@@ -1083,16 +1274,21 @@ impl Timer {
             Phase::Focus(f) if f.seg_start.is_some() => {
                 if self.focus_total_secs(&f, now) >= f.planned_min * 60 {
                     let actual_min = round_up_min(self.focus_total_secs(&f, now));
-                    return vec![SessionCompleted { session_id: f.session_id, actual_min }.into()];
+                    return vec![
+                        SessionCompleted {
+                            session_id: f.session_id,
+                            actual_min,
+                        }
+                        .into(),
+                    ];
                 }
             }
-            Phase::Break(b)
-                if (now - b.started_at).num_seconds() >= b.duration_min * 60 => {
-                    // Конец перерыва — локальное состояние; на_timeline остаётся
-                    // восстановимым из BreakEvent(started_at + duration).
-                    self.phase = Phase::Idle;
-                    self.last_stage_end = Some(now);
-                }
+            Phase::Break(b) if (now - b.started_at).num_seconds() >= b.duration_min * 60 => {
+                // Конец перерыва — локальное состояние; на_timeline остаётся
+                // восстановимым из BreakEvent(started_at + duration).
+                self.phase = Phase::Idle;
+                self.last_stage_end = Some(now);
+            }
             _ => {}
         }
         Vec::new()
@@ -1129,7 +1325,14 @@ impl Timer {
     /// разрыв; при пустом банке поведение совпадает с обычным ответом.
     fn gap_events(&self, gap: GapWindow, as_rest: bool) -> Vec<Event> {
         if !as_rest {
-            return vec![GapLogged { started_at: gap.0, ended_at: gap.1, reason: gap.2 }.into()];
+            return vec![
+                GapLogged {
+                    started_at: gap.0,
+                    ended_at: gap.1,
+                    reason: gap.2,
+                }
+                .into(),
+            ];
         }
         let total_min = (gap.1 - gap.0).num_minutes();
         let rest_min = total_min.min(self.bank_min());
@@ -1180,7 +1383,9 @@ fn session_mut(sessions: &mut [UiSession], id: Uuid) -> Option<&mut UiSession> {
 
 /// Секунды текущего рабочего отрезка до момента `ts` (если не на паузе).
 fn seg_secs(f: &FocusPhase, ts: DateTime<Local>) -> i64 {
-    f.seg_start.map(|s| (ts - s).num_seconds().max(0)).unwrap_or(0)
+    f.seg_start
+        .map(|s| (ts - s).num_seconds().max(0))
+        .unwrap_or(0)
 }
 
 /// Чистые минуты фокуса, округлённые вверх, минимум 1.

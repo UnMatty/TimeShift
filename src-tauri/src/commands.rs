@@ -9,13 +9,13 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-use crate::config::{Config, TimerConfig};
+use crate::config::{Config, DbBackend, TimerConfig};
 use crate::timer::{OpError, Snapshot, Timer};
-use crate::vault::client::{VaultClient, VaultError};
-use crate::vault::today::{parse_today, TodayTask};
 use crate::vault::TODAY_NOTE_PATH;
-use crate::wal::event::{WalRecord, *};
+use crate::vault::client::{VaultClient, VaultError};
+use crate::vault::today::{TodayTask, parse_today};
 use crate::wal::Wal;
+use crate::wal::event::{WalRecord, *};
 
 /// Общее состояние приложения.
 pub struct AppState {
@@ -54,39 +54,57 @@ impl AppState {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CmdError {
     /// Большой разрыв между этапами — UI должен спросить «где был?» (FR-4).
-    GapNeeded { minutes: i64 },
-    Message { text: String },
+    GapNeeded {
+        minutes: i64,
+    },
+    Message {
+        text: String,
+    },
 }
 
 impl From<OpError> for CmdError {
     fn from(e: OpError) -> Self {
         match e {
             OpError::NeedGap { minutes } => CmdError::GapNeeded { minutes },
-            other => CmdError::Message { text: other.to_string() },
+            other => CmdError::Message {
+                text: other.to_string(),
+            },
         }
     }
 }
 
 impl From<VaultError> for CmdError {
     fn from(e: VaultError) -> Self {
-        CmdError::Message { text: e.to_string() }
+        CmdError::Message {
+            text: e.to_string(),
+        }
     }
 }
 
-/// Клиент хранилища из текущего конфига. Не настроен — внятная ошибка.
+/// Клиент хранилища из текущего конфига. Модуль выключен или не настроен —
+/// внятная ошибка (vault-петля такие ошибки молча пропускает).
 pub fn vault_client(app: &AppHandle) -> Result<VaultClient, CmdError> {
     let state = app.state::<AppState>();
     let cfg = state.config.lock().expect("конфиг");
+    if !cfg.vault.enabled {
+        return Err(CmdError::Message {
+            text: "модуль Obsidian выключен в настройках".into(),
+        });
+    }
     let url = cfg
         .vault
         .api_url
         .as_deref()
-        .ok_or_else(|| CmdError::Message { text: "хранилище не настроено: нет api_url в ~/.timeshift/config.toml".into() })?;
+        .ok_or_else(|| CmdError::Message {
+            text: "хранилище не настроено: нет api_url в ~/.timeshift/config.toml".into(),
+        })?;
     let key = cfg
         .vault
         .api_key
         .as_deref()
-        .ok_or_else(|| CmdError::Message { text: "хранилище не настроено: нет api_key в ~/.timeshift/config.toml".into() })?;
+        .ok_or_else(|| CmdError::Message {
+            text: "хранилище не настроено: нет api_key в ~/.timeshift/config.toml".into(),
+        })?;
     VaultClient::new(url, key).map_err(|e| CmdError::Message { text: e })
 }
 
@@ -102,7 +120,9 @@ where
     {
         let mut wal = state.wal.lock().expect("журнал");
         for event in events {
-            records.push(wal.append(event).map_err(|e| CmdError::Message { text: e.to_string() })?);
+            records.push(wal.append(event).map_err(|e| CmdError::Message {
+                text: e.to_string(),
+            })?);
         }
     }
     let snapshot = {
@@ -137,7 +157,9 @@ pub fn notify_side_effects(app: &AppHandle, records: &[WalRecord]) {
                     (planned, timer.proposed_break())
                 };
                 let break_hint = match next_break {
-                    Some(p) if p.kind == BreakKind::Long => format!("длинный перерыв {} мин", p.duration_min),
+                    Some(p) if p.kind == BreakKind::Long => {
+                        format!("длинный перерыв {} мин", p.duration_min)
+                    }
                     Some(p) => format!("перерыв {} мин", p.duration_min),
                     None => "перерыв".into(),
                 };
@@ -154,13 +176,20 @@ pub fn notify_side_effects(app: &AppHandle, records: &[WalRecord]) {
             {
                 // Долгий перерыв заслуживает настойчивого напоминания
                 // (запись «разрыв = отдых» — не про отдых у экрана).
-                notify(app, "☕ Длинный перерыв", &format!("{} минут. Отойди от экрана.", e.duration_min));
+                notify(
+                    app,
+                    "☕ Длинный перерыв",
+                    &format!("{} минут. Отойди от экрана.", e.duration_min),
+                );
             }
             Event::DayClosed(e) => {
                 notify(
                     app,
                     "🌙 День закрыт",
-                    &format!("Банк отдыха сгорел: {} мин. Завтра — новый день.", e.burned_min),
+                    &format!(
+                        "Банк отдыха сгорел: {} мин. Завтра — новый день.",
+                        e.burned_min
+                    ),
                 );
             }
             _ => {}
@@ -170,7 +199,11 @@ pub fn notify_side_effects(app: &AppHandle, records: &[WalRecord]) {
 
 /// Мягкое уведомление об окончании перерыва (FR-28) — из тика и end_break.
 pub fn notify_break_over(app: &AppHandle) {
-    notify(app, "Перерыв окончен", "Возвращаемся. Старт следующей помидорки — за тобой.");
+    notify(
+        app,
+        "Перерыв окончен",
+        "Возвращаемся. Старт следующей помидорки — за тобой.",
+    );
 }
 
 /// Напоминание о накопленном банке отдыха при старте фокуса (FR-29).
@@ -178,7 +211,11 @@ pub fn maybe_notify_bank(app: &AppHandle) {
     let state = app.state::<AppState>();
     let bank = state.timer.lock().expect("таймер").bank_min();
     if bank >= 15 {
-        notify(app, "У тебя в банке отдыха лежит минут", &format!("{bank} минут нерастраченного отдыха — потрать их на перерыве."));
+        notify(
+            app,
+            "У тебя в банке отдыха лежит минут",
+            &format!("{bank} минут нерастраченного отдыха — потрать их на перерыве."),
+        );
     }
 }
 
@@ -198,12 +235,21 @@ pub fn update_tray(app: &AppHandle, snap: &Snapshot) {
     let Some(tray) = state.tray.get() else { return };
     let title = match &snap.phase {
         crate::timer::PhaseView::Idle => "◦".into(),
-        crate::timer::PhaseView::Focus { planned_min, elapsed_secs, paused, .. } => {
+        crate::timer::PhaseView::Focus {
+            planned_min,
+            elapsed_secs,
+            paused,
+            ..
+        } => {
             let remaining = (planned_min * 60 - elapsed_secs).max(0);
             let mark = if *paused { "⏸" } else { "🍅" };
             format!("{mark} {}:{:02}", remaining / 60, remaining % 60)
         }
-        crate::timer::PhaseView::Break { break_kind, remaining_secs, .. } => {
+        crate::timer::PhaseView::Break {
+            break_kind,
+            remaining_secs,
+            ..
+        } => {
             let mark = match break_kind {
                 BreakKind::Long => "☕",
                 BreakKind::Bank => "🛌",
@@ -251,7 +297,9 @@ pub fn start_focus(
             .and_then(|p| p.tasks.iter().find(|t| t.id == id))
             .map(|t| (t.title.clone(), t.section))
     });
-    let (task_label, task_category) = resolved.flatten().unwrap_or_else(|| (String::new(), PlanSection::Work));
+    let (task_label, task_category) = resolved
+        .flatten()
+        .unwrap_or_else(|| (String::new(), PlanSection::Work));
     let label = match (&label, plan_task_id.is_some()) {
         (Some(l), _) => Some(l.clone()),
         (None, true) => Some(task_label),
@@ -265,7 +313,15 @@ pub fn start_focus(
     });
 
     let snap = run_op(&app, |t| {
-        t.op_start_focus(Local::now(), label, confidential, gap_reason, gap_as_rest, category, plan_task_id)
+        t.op_start_focus(
+            Local::now(),
+            label,
+            confidential,
+            gap_reason,
+            gap_as_rest,
+            category,
+            plan_task_id,
+        )
     })?;
     maybe_notify_bank(&app);
     Ok(snap)
@@ -297,7 +353,9 @@ pub fn start_break(
     gap_reason: Option<String>,
     gap_as_rest: bool,
 ) -> Result<Snapshot, CmdError> {
-    run_op(&app, |t| t.op_start_break(Local::now(), gap_reason, gap_as_rest))
+    run_op(&app, |t| {
+        t.op_start_break(Local::now(), gap_reason, gap_as_rest)
+    })
 }
 
 /// «Отдохнуть весь накопленный банк» (v0.1.1).
@@ -307,7 +365,9 @@ pub fn start_bank_break(
     gap_reason: Option<String>,
     gap_as_rest: bool,
 ) -> Result<Snapshot, CmdError> {
-    run_op(&app, |t| t.op_start_bank_break(Local::now(), gap_reason, gap_as_rest))
+    run_op(&app, |t| {
+        t.op_start_bank_break(Local::now(), gap_reason, gap_as_rest)
+    })
 }
 
 #[tauri::command]
@@ -349,7 +409,11 @@ pub fn set_note(app: AppHandle, session_id: Uuid, note: String) -> Result<Snapsh
 }
 
 #[tauri::command]
-pub fn set_category(app: AppHandle, session_id: Uuid, category: Category) -> Result<Snapshot, CmdError> {
+pub fn set_category(
+    app: AppHandle,
+    session_id: Uuid,
+    category: Category,
+) -> Result<Snapshot, CmdError> {
     run_op(&app, |t| t.op_set_category(session_id, category))
 }
 
@@ -364,14 +428,19 @@ pub fn add_manual_session(
     category: Option<Category>,
 ) -> Result<Snapshot, CmdError> {
     use chrono::TimeZone as _;
-    let time = NaiveTime::parse_from_str(&started_at, "%H:%M")
-        .map_err(|_| CmdError::Message { text: "время в формате ЧЧ:ММ".into() })?;
+    let time = NaiveTime::parse_from_str(&started_at, "%H:%M").map_err(|_| CmdError::Message {
+        text: "время в формате ЧЧ:ММ".into(),
+    })?;
     let naive = Local::now().date_naive().and_time(time);
     let start = Local
         .from_local_datetime(&naive)
         .single()
-        .ok_or_else(|| CmdError::Message { text: "некорректное локальное время".into() })?;
-    run_op(&app, |t| t.op_add_manual_session(start, minutes, label, note, category))
+        .ok_or_else(|| CmdError::Message {
+            text: "некорректное локальное время".into(),
+        })?;
+    run_op(&app, |t| {
+        t.op_add_manual_session(start, minutes, label, note, category)
+    })
 }
 
 #[tauri::command]
@@ -385,14 +454,26 @@ pub fn close_day(app: AppHandle) -> Result<Snapshot, CmdError> {
 
 /// Импорт плана из «☀️ Сегодня»: свежее чтение → парсер → событие PlanBuilt.
 /// Ноль чекбоксов — не тихий пустой план, а внятная ошибка (ARCH §9).
+/// Модуль Obsidian не активен — план ведётся вручную, импорт подсказывает об этом.
 #[tauri::command]
 pub async fn build_plan_from_today(app: AppHandle) -> Result<Snapshot, CmdError> {
+    {
+        let state = app.state::<AppState>();
+        let cfg = state.config.lock().expect("конфиг");
+        if !cfg.vault.is_active() {
+            return Err(CmdError::Message {
+                text: "Obsidian не подключён: модуль выключен или не заданы api_url/api_key. Добавьте задачи вручную — план работает и без «☀️ Сегодня».".into(),
+            });
+        }
+    }
     let client = vault_client(&app)?;
     let raw = client.read_note(TODAY_NOTE_PATH).await?;
     let note = parse_today(&raw);
     if note.is_empty() {
         return Err(CmdError::Message {
-            text: "в «☀️ Сегодня» не нашлось ни одного чекбокса — заметка пустая или формат изменился".into(),
+            text:
+                "в «☀️ Сегодня» не нашлось ни одного чекбокса — заметка пустая или формат изменился"
+                    .into(),
         });
     }
     let day = {
@@ -440,7 +521,9 @@ pub fn edit_plan_task(
     section: Option<PlanSection>,
     est_pomodoros: Option<u32>,
 ) -> Result<Snapshot, CmdError> {
-    run_op(&app, |t| t.op_edit_plan_task(task_id, section, est_pomodoros))
+    run_op(&app, |t| {
+        t.op_edit_plan_task(task_id, section, est_pomodoros)
+    })
 }
 
 #[tauri::command]
@@ -455,25 +538,32 @@ pub fn add_meeting(
     starts_at: Option<String>,
     duration_min: Option<i64>,
 ) -> Result<Snapshot, CmdError> {
-    let starts_at = match starts_at.as_deref() {
-        None | Some("") => None,
-        Some(hhmm) => {
-            use chrono::TimeZone as _;
-            let time = NaiveTime::parse_from_str(hhmm, "%H:%M")
-                .map_err(|_| CmdError::Message { text: "время встречи в формате ЧЧ:ММ".into() })?;
-            let naive = Local::now().date_naive().and_time(time);
-            Some(
-                Local.from_local_datetime(&naive).single().ok_or_else(|| CmdError::Message {
-                    text: "некорректное локальное время встречи".into(),
-                })?,
-            )
-        }
-    };
+    let starts_at =
+        match starts_at.as_deref() {
+            None | Some("") => None,
+            Some(hhmm) => {
+                use chrono::TimeZone as _;
+                let time =
+                    NaiveTime::parse_from_str(hhmm, "%H:%M").map_err(|_| CmdError::Message {
+                        text: "время встречи в формате ЧЧ:ММ".into(),
+                    })?;
+                let naive = Local::now().date_naive().and_time(time);
+                Some(Local.from_local_datetime(&naive).single().ok_or_else(|| {
+                    CmdError::Message {
+                        text: "некорректное локальное время встречи".into(),
+                    }
+                })?)
+            }
+        };
     run_op(&app, |t| t.op_add_meeting(title, starts_at, duration_min))
 }
 
 #[tauri::command]
-pub fn set_meeting_happened(app: AppHandle, meeting_id: Uuid, happened: bool) -> Result<Snapshot, CmdError> {
+pub fn set_meeting_happened(
+    app: AppHandle,
+    meeting_id: Uuid,
+    happened: bool,
+) -> Result<Snapshot, CmdError> {
     run_op(&app, |t| t.op_set_meeting_happened(meeting_id, happened))
 }
 
@@ -481,26 +571,45 @@ pub fn set_meeting_happened(app: AppHandle, meeting_id: Uuid, happened: bool) ->
 // Настройки
 // ---------------------------------------------------------------------------
 
+/// Настройки для UI: таймер + модули (v0.3). Ключи живут в config.toml;
+/// в UI отдаются, чтобы поле можно было отредактировать (ввод закрытый).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SettingsDto {
     pub timer: TimerConfig,
     pub autostart: bool,
     pub db_online: bool,
+    /// Резолвнутый бэкенд реплики (легаси-конфиг с url → postgres).
+    pub db_backend: DbBackend,
+    pub db_url: Option<String>,
+    pub vault_enabled: bool,
+    pub vault_api_url: Option<String>,
+    pub vault_api_key: Option<String>,
+    pub vault_active: bool,
 }
 
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> SettingsDto {
     let state = app.state::<AppState>();
     let config = state.config.lock().expect("конфиг");
+    let (db_backend, _) = config.db.effective();
     SettingsDto {
         timer: config.timer,
         autostart: config.app.autostart,
         db_online: state.db_online(),
+        // backend резолвится (легаси-url → postgres), url отдаётся как в конфиге:
+        // поле в UI не должно быть предзаполнено адресом чужого бэкенда при смене.
+        db_backend,
+        db_url: config.db.url.clone(),
+        vault_enabled: config.vault.enabled,
+        vault_api_url: config.vault.api_url.clone(),
+        vault_api_key: config.vault.api_key.clone(),
+        vault_active: config.vault.is_active(),
     }
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn save_settings(
     app: AppHandle,
     focus_min: i64,
@@ -509,6 +618,11 @@ pub fn save_settings(
     long_every: u32,
     gap_threshold_min: i64,
     autostart: bool,
+    db_backend: DbBackend,
+    db_url: Option<String>,
+    vault_enabled: bool,
+    vault_api_url: Option<String>,
+    vault_api_key: Option<String>,
 ) -> Result<SettingsDto, CmdError> {
     let state = app.state::<AppState>();
     {
@@ -521,7 +635,15 @@ pub fn save_settings(
             gap_threshold_min: gap_threshold_min.max(1),
         };
         config.app.autostart = autostart;
-        config.save().map_err(|e| CmdError::Message { text: format!("не удалось сохранить конфиг: {e}") })?;
+        // Модули (v0.3): пустая строка в поле = очистить значение.
+        config.db.backend = Some(db_backend);
+        config.db.url = db_url.filter(|s| !s.trim().is_empty());
+        config.vault.enabled = vault_enabled;
+        config.vault.api_url = vault_api_url.filter(|s| !s.trim().is_empty());
+        config.vault.api_key = vault_api_key.filter(|s| !s.trim().is_empty());
+        config.save().map_err(|e| CmdError::Message {
+            text: format!("не удалось сохранить конфиг: {e}"),
+        })?;
         state.timer.lock().expect("таймер").cfg = config.timer;
     }
 

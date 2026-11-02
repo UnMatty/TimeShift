@@ -1,24 +1,21 @@
-//! Репликатор WAL → Postgres (WP-4, ARCHITECTURE §3.3).
-//!
-//! Правило идемпотентности: событие применяется в той же транзакции, что и
-//! вставка в `applied_events` — повторный прогон журнала не создаёт дублей.
-//! Docker остановлен или БД недоступна — цикл молча ретраит; в UI статус
-//! отдаётся через `db_online`.
+//! Postgres-реплика (decision #11 PRD: существующий контейнер `postgres-db`).
+//! Подключение/миграции и маппинг событий на схему (ARCHITECTURE §4) —
+//! без изменений с v0.1; из модуля db/ (v0.3) вызывается через `Pool::Pg`.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Transaction};
 use uuid::Uuid;
 
-use crate::wal::event::*;
-use crate::wal::read_all;
+use super::{
+    break_action_str, break_kind_str, category_str, err, plan_section_str, reason_str,
+    resolution_str, source_code,
+};
+use crate::wal::event::{Event, WalRecord};
 
 /// Подключается и применяет миграции (`../migrations` относительно src-tauri).
-pub async fn connect(url: &str) -> Result<PgPool, String> {
+pub(super) async fn connect(url: &str) -> Result<PgPool, String> {
     let pool = PgPoolOptions::new()
         .max_connections(3)
         .acquire_timeout(Duration::from_secs(3))
@@ -32,73 +29,32 @@ pub async fn connect(url: &str) -> Result<PgPool, String> {
     Ok(pool)
 }
 
-/// Вечный цикл: подключение → репликация → при потере связи переподключение.
-pub async fn replicator_loop(url: String, wal_dir: std::path::PathBuf, online: Arc<AtomicBool>) {
-    loop {
-        match connect(&url).await {
-            Ok(pool) => {
-                online.store(true, Ordering::Relaxed);
-                match replicate_cycles(&wal_dir, &pool, &online).await {
-                    Ok(()) => unreachable!("replicate_cycles бесконечен"),
-                    Err(()) => { /* связь потеряна — переподключение */ }
-                }
-            }
-            Err(e) => {
-                online.store(false, Ordering::Relaxed);
-                eprintln!("timeshift: БД недоступна ({e}); журнал копится в WAL, повтор через 10 с");
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-        }
-    }
-}
-
-async fn replicate_cycles(wal_dir: &Path, pool: &PgPool, online: &Arc<AtomicBool>) -> Result<(), ()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        interval.tick().await;
-        match replicate_once(wal_dir, pool).await {
-            Ok(n) => {
-                online.store(true, Ordering::Relaxed);
-                if n > 0 {
-                    println!("timeshift: дореплицировано событий: {n}");
-                }
-            }
-            Err(e) => {
-                online.store(false, Ordering::Relaxed);
-                eprintln!("timeshift: репликация отложена: {e}");
-                return Err(());
-            }
-        }
-    }
-}
-
-/// Прогоняет весь журнал через БД; уже применённые события отсекаются
-/// по `applied_events`. Возвращает число новых применённых.
-async fn replicate_once(wal_dir: &Path, pool: &PgPool) -> Result<usize, String> {
-    let playback = read_all(wal_dir).map_err(|e| e.to_string())?;
-    let mut applied = 0;
-    for record in &playback.events {
-        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-        let inserted = sqlx::query(
-            "INSERT INTO applied_events (event_id) VALUES ($1) ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
-        )
-        .bind(record.id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-        if inserted.is_some() {
-            apply_event(&mut tx, record).await?;
-            applied += 1;
-        }
+/// Применяет одну запись журнала; повторная отсекается по `applied_events`
+/// в той же транзакции. Возвращает 0/1 — применена ли запись.
+pub(super) async fn replicate_record(pool: &PgPool, record: &WalRecord) -> Result<usize, String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let inserted = sqlx::query(
+        "INSERT INTO applied_events (event_id) VALUES ($1) ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+    )
+    .bind(record.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if inserted.is_none() {
         tx.commit().await.map_err(|e| e.to_string())?;
+        return Ok(0);
     }
-    Ok(applied)
+    apply_event(&mut tx, record).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(1)
 }
 
 /// Маппинг события на схему (ARCHITECTURE §4). Строковые коды статусов/категорий —
 /// те же, что в комментариях миграции.
-async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &WalRecord) -> Result<(), String> {
+async fn apply_event(
+    tx: &mut Transaction<'static, sqlx::Postgres>,
+    record: &WalRecord,
+) -> Result<(), String> {
     let ts = record.ts;
     match record.event.clone() {
         Event::SessionStarted(e) => {
@@ -110,7 +66,7 @@ async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &Wal
             .bind(ts)
             .bind(e.planned_min as i32)
             .bind(e.confidential)
-            .bind(source_str(e.source))
+            .bind(source_code(e.source))
             .bind(e.label)
             .bind(e.plan_task_id)
             .execute(&mut **tx)
@@ -123,13 +79,15 @@ async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &Wal
                 .execute(&mut **tx)
                 .await
                 .map_err(err("session_paused/status"))?;
-            sqlx::query("INSERT INTO session_pauses (id, session_id, started_at) VALUES ($1, $2, $3)")
-                .bind(e.pause_id)
-                .bind(e.session_id)
-                .bind(ts)
-                .execute(&mut **tx)
-                .await
-                .map_err(err("session_pauses/insert"))?;
+            sqlx::query(
+                "INSERT INTO session_pauses (id, session_id, started_at) VALUES ($1, $2, $3)",
+            )
+            .bind(e.pause_id)
+            .bind(e.session_id)
+            .bind(ts)
+            .execute(&mut **tx)
+            .await
+            .map_err(err("session_pauses/insert"))?;
         }
         Event::PauseReason(e) => {
             sqlx::query("UPDATE session_pauses SET reason = $2 WHERE id = $1")
@@ -212,13 +170,15 @@ async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &Wal
                 .map_err(err("thought_parked"))?;
         }
         Event::ThoughtResolved(e) => {
-            sqlx::query("UPDATE parked_thoughts SET resolved_at = $2, resolution = $3 WHERE id = $1")
-                .bind(e.thought_id)
-                .bind(ts)
-                .bind(resolution_str(e.resolution))
-                .execute(&mut **tx)
-                .await
-                .map_err(err("thought_resolved"))?;
+            sqlx::query(
+                "UPDATE parked_thoughts SET resolved_at = $2, resolution = $3 WHERE id = $1",
+            )
+            .bind(e.thought_id)
+            .bind(ts)
+            .bind(resolution_str(e.resolution))
+            .execute(&mut **tx)
+            .await
+            .map_err(err("thought_resolved"))?;
         }
         Event::BreakEvent(e) => {
             sqlx::query(
@@ -396,63 +356,4 @@ async fn apply_event(tx: &mut Transaction<'static, sqlx::Postgres>, record: &Wal
         Event::VaultSyncStatus(_) => {}
     }
     Ok(())
-}
-
-fn err(stage: &'static str) -> impl Fn(sqlx::Error) -> String {
-    move |e| format!("{stage}: {e}")
-}
-
-fn source_str(s: SessionSource) -> &'static str {
-    match s {
-        SessionSource::Timer => "timer",
-        SessionSource::Manual => "manual",
-    }
-}
-
-fn reason_str(r: PauseReason) -> &'static str {
-    match r {
-        PauseReason::Internal => "internal",
-        PauseReason::External => "external",
-        PauseReason::Away => "away",
-    }
-}
-
-fn category_str(c: Category) -> &'static str {
-    match c {
-        Category::Work => "work",
-        Category::Personal => "personal",
-        Category::Meeting => "meeting",
-    }
-}
-
-fn resolution_str(r: ThoughtResolution) -> &'static str {
-    match r {
-        ThoughtResolution::Note => "note",
-        ThoughtResolution::TaskDraft => "task_draft",
-        ThoughtResolution::Dismissed => "dismissed",
-    }
-}
-
-fn break_kind_str(k: BreakKind) -> &'static str {
-    match k {
-        BreakKind::Short => "short",
-        BreakKind::Long => "long",
-        BreakKind::Bank => "bank",
-    }
-}
-
-fn break_action_str(a: BreakAction) -> &'static str {
-    match a {
-        BreakAction::Taken => "taken",
-        BreakAction::SkipToShort => "skip_to_short",
-        BreakAction::SkipToLong => "skip_to_long",
-        BreakAction::SkipPlain => "skip_plain",
-    }
-}
-
-fn plan_section_str(s: PlanSection) -> &'static str {
-    match s {
-        PlanSection::Work => "work",
-        PlanSection::Personal => "personal",
-    }
 }

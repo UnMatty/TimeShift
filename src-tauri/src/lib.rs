@@ -23,8 +23,8 @@ use config::Config;
 use timer::Timer;
 use uuid::Uuid;
 use vault::client::VaultError;
-use wal::event::{BreakAction, PauseReason, PlanTaskSynced};
 use wal::Wal;
+use wal::event::{BreakAction, PauseReason, PlanTaskSynced};
 
 const PARK_SHORTCUT: &str = "CmdOrCtrl+Shift+Space";
 
@@ -46,7 +46,10 @@ pub fn run() {
             for record in &playback.events {
                 timer.fold(record);
             }
-            println!("timeshift: журнал проигран, событий: {}", playback.events.len());
+            println!(
+                "timeshift: журнал проигран, событий: {}",
+                playback.events.len()
+            );
         }
         Err(e) => eprintln!("timeshift: журнал не прочитан ({e}); старт с пустого состояния"),
     }
@@ -62,7 +65,10 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(AppState::new(timer, wal, config))
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
@@ -114,23 +120,44 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move { tick_loop(handle).await });
 
-            // Репликатор WAL → Postgres (WP-4).
-            let (url, wal_dir, online) = {
+            // Репликатор WAL → хранилище (v0.3: бэкенд подключаемый — none/sqlite/postgres).
+            let (backend, url, wal_dir, online) = {
                 let state = app.state::<AppState>();
                 let cfg = state.config.lock().expect("конфиг");
-                let wal = state.wal.lock().expect("журнал");
-                (cfg.db.url.clone(), wal.dir().to_path_buf(), state.db_online_flag())
+                let (backend, url) = cfg.db.effective();
+                let wal_dir = state.wal.lock().expect("журнал").dir().to_path_buf();
+                (backend, url, wal_dir, state.db_online_flag())
             };
-            tauri::async_runtime::spawn(async move {
-                db::replicator_loop(url, wal_dir, online).await;
-            });
+            match backend {
+                config::DbBackend::None => {
+                    // Реплики нет: всё хранится локально в WAL — это норма, не офлайн.
+                    online.store(true, std::sync::atomic::Ordering::Relaxed);
+                    println!(
+                        "timeshift: репликация выключена (backend = none); хранение — WAL-файлы"
+                    );
+                }
+                other => {
+                    if let Some(url) = url {
+                        tauri::async_runtime::spawn(async move {
+                            db::replicator_loop(other, url, wal_dir, online).await;
+                        });
+                    }
+                }
+            }
 
             // Vault-синк (v0.2): чекбоксы «☀️ Сегодня» + фокус-лог при закрытии дня.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move { vault_loop(handle).await });
 
             // Восстановить автозапуск из конфига.
-            if app.state::<AppState>().config.lock().expect("конфиг").app.autostart {
+            if app
+                .state::<AppState>()
+                .config
+                .lock()
+                .expect("конфиг")
+                .app
+                .autostart
+            {
                 use tauri_plugin_autostart::ManagerExt as _;
                 app.autolaunch().enable().ok();
             }
@@ -157,7 +184,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let skip_short = item("skip_short", "прибавить к следующему короткому")?;
     let skip_long = item("skip_long", "прибавить к следующему длинному")?;
     let skip_plain = item("skip_plain", "просто пропустить")?;
-    let skip = Submenu::with_items(app, "⏭ Пропустить перерыв", true, &[&skip_short, &skip_long, &skip_plain])?;
+    let skip = Submenu::with_items(
+        app,
+        "⏭ Пропустить перерыв",
+        true,
+        &[&skip_short, &skip_long, &skip_plain],
+    )?;
     let park = item("park", "💭 Мысль на парковку")?;
     let close_day = item("close_day", "🌙 Завершить день")?;
     let open = item("open", "Открыть TimeShift")?;
@@ -186,7 +218,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     )?;
 
     let tray = TrayIconBuilder::with_id("main-tray")
-        .icon(app.default_window_icon().expect("иконка приложения").clone())
+        .icon(
+            app.default_window_icon()
+                .expect("иконка приложения")
+                .clone(),
+        )
         .menu(&menu)
         .show_menu_on_left_click(true)
         .title("◦")
@@ -301,17 +337,28 @@ async fn vault_loop(app: AppHandle) {
             }
             let write_ok = !to_write;
             let write_ok = if to_write {
-                client.write_note(vault::TODAY_NOTE_PATH, &updated).await.is_ok()
+                client
+                    .write_note(vault::TODAY_NOTE_PATH, &updated)
+                    .await
+                    .is_ok()
             } else {
                 write_ok
             };
             for (task_id, done, conflict) in results {
                 let event = match conflict {
                     // Конфликт: состояние не трогаем, в WAL уходит аудит.
-                    Some(detail) => PlanTaskSynced { task_id, today_note_done: done, conflict: Some(detail) },
+                    Some(detail) => PlanTaskSynced {
+                        task_id,
+                        today_note_done: done,
+                        conflict: Some(detail),
+                    },
                     // Успешная замена фиксируется только если PUT прошёл;
                     // иначе — тишина, синк повторится в следующем тике.
-                    None if write_ok => PlanTaskSynced { task_id, today_note_done: done, conflict: None },
+                    None if write_ok => PlanTaskSynced {
+                        task_id,
+                        today_note_done: done,
+                        conflict: None,
+                    },
                     None => continue,
                 };
                 append_and_fold(&app, vec![event.into()]);
@@ -347,7 +394,8 @@ async fn vault_loop(app: AppHandle) {
                     }
                     // недоступно — повторим в следующем тике
                 }
-                Err(_) => { /* недоступно — повторим в следующем тике */ }
+                Err(_) => { /* недоступно — повторим в следующем тике */
+                }
             }
         }
     }
@@ -418,7 +466,8 @@ async fn tick_loop(app: AppHandle) {
                     timer.fold(record);
                 }
             }
-            commands::notify_side_effects(&app, &records);        }
+            commands::notify_side_effects(&app, &records);
+        }
 
         let snap = {
             let state = app.state::<AppState>();
@@ -426,7 +475,8 @@ async fn tick_loop(app: AppHandle) {
         };
 
         // Окончание перерыва по тику — мягкое уведомление (FR-28).
-        let break_running = matches!(snap.phase, timer::PhaseView::Break { .. });        if prev_break_running && !break_running {
+        let break_running = matches!(snap.phase, timer::PhaseView::Break { .. });
+        if prev_break_running && !break_running {
             commands::notify_break_over(&app);
         }
         prev_break_running = break_running;

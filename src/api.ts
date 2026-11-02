@@ -115,6 +115,10 @@ export interface Snapshot {
   proposed_break: ProposedBreak | null;
 }
 
+/// Бэкенд реплики WAL (v0.3 «Модули»). WAL-файлы — всегда источник истины;
+/// `none` — приложение живёт только на них.
+export type DbBackend = "none" | "sqlite" | "postgres";
+
 export interface Settings {
   timer: {
     focus_min: number;
@@ -125,6 +129,12 @@ export interface Settings {
   };
   autostart: boolean;
   db_online: boolean;
+  db_backend: DbBackend;
+  db_url: string | null;
+  vault_enabled: boolean;
+  vault_api_url: string | null;
+  vault_api_key: string | null;
+  vault_active: boolean;
 }
 
 /// Ошибка команды: структурированный вопрос о разрыве или текст.
@@ -188,14 +198,19 @@ export const api = {
   setMeetingHappened: (meetingId: string, happened: boolean) =>
     invoke<Snapshot>("set_meeting_happened", { meetingId, happened }),
   getSettings: () => invoke<Settings>("get_settings"),
-  saveSettings: (s: Settings["timer"], autostart: boolean) =>
+  saveSettings: (s: Settings) =>
     invoke<Settings>("save_settings", {
-      focusMin: s.focus_min,
-      shortBreakMin: s.short_break_min,
-      longBreakMin: s.long_break_min,
-      longEvery: s.long_every,
-      gapThresholdMin: s.gap_threshold_min,
-      autostart,
+      focusMin: s.timer.focus_min,
+      shortBreakMin: s.timer.short_break_min,
+      longBreakMin: s.timer.long_break_min,
+      longEvery: s.timer.long_every,
+      gapThresholdMin: s.timer.gap_threshold_min,
+      autostart: s.autostart,
+      dbBackend: s.db_backend,
+      dbUrl: s.db_url,
+      vaultEnabled: s.vault_enabled,
+      vaultApiUrl: s.vault_api_url,
+      vaultApiKey: s.vault_api_key,
     }),
 };
 

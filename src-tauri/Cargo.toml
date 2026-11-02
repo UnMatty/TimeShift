@@ -1,6 +1,6 @@
 [package]
 name = "timeshift"
-version = "0.2.1"
+version = "0.3.0"
 description = "TimeShift — помидорка, встроенная в личную экосистему"
 authors = ["matvejunesihin"]
 license = "MIT"
@@ -38,6 +38,7 @@ sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls",
   "postgres",
+  "sqlite",
   "migrate",
   "macros",
   "chrono",
