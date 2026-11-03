@@ -28,6 +28,20 @@ fn apply(t: &mut Timer, ts: DateTime<Local>, events: Vec<Event>) {
     }
 }
 
+/// Тот же прогон, но через `fold_replay` — шаг реилея при восстановлении из
+/// журнала: смена суток открывается до применения записи. Так стартовый
+/// реилей делает lib.rs.
+fn apply_replay(t: &mut Timer, ts: DateTime<Local>, events: Vec<Event>) {
+    for event in events {
+        let record = WalRecord {
+            id: Uuid::new_v4(),
+            ts,
+            event,
+        };
+        t.fold_replay(&record);
+    }
+}
+
 /// Полный цикл: фокус с паузой → завершение → короткий перерыв → следующая
 /// помидорка → пропуск перерыва в банк.
 #[test]
@@ -421,6 +435,91 @@ fn day_rollover_clears_daily_data() {
     );
     assert!(t.sessions.is_empty());
     assert_eq!(t.current_date, midnight2.date_naive());
+}
+
+/// Перезапуск через несколько дней (v0.3.1): реилей прокатывает дни журнала —
+/// в состоянии остаётся только последний день, и первый «Старт» нового дня
+/// не спрашивает о разрыве от этапов позапрошлого дня.
+#[test]
+fn replay_across_days_keeps_only_last_day() {
+    let mut t = timer();
+    t.begin_replay();
+
+    // День 1: помидорка + скип в банк.
+    let day1 = ts_at(2026, 10, 27, 11, 0);
+    let events = t
+        .op_start_focus(day1, None, false, None, false, None, None)
+        .unwrap();
+    apply_replay(&mut t, day1, events);
+    let done1 = day1 + chrono::Duration::minutes(25);
+    let events = t.tick(done1);
+    apply_replay(&mut t, done1, events);
+    let events = t.op_skip_break(BreakAction::SkipToLong).unwrap();
+    apply_replay(&mut t, done1, events);
+    assert_eq!(t.bank_min(), 5);
+    assert!(t.last_stage_end.is_some());
+
+    // День 2: первая запись дня открывает его ДО применения — сессия дня 2
+    // сохраняется, дневные данные дня 1 (включая last_stage_end) сброшены.
+    // Банк в реилее не сгорает: он сгорит событием при закрытии последнего дня.
+    let day2 = ts_at(2026, 10, 28, 12, 0);
+    apply_replay(&mut t, day2, vec![base_session()]);
+    assert_eq!(t.current_date, day2.date_naive());
+    assert_eq!(t.sessions.len(), 1, "первая сессия дня не стирается ролловером");
+    assert_eq!(t.bank_min(), 5, "банк ждёт закрытия дня, не пропадает");
+    assert!(t.last_stage_end.is_none(), "день 2 открыт чистым");
+    let done2 = day2 + chrono::Duration::minutes(25);
+    apply_replay(
+        &mut t,
+        done2,
+        vec![SessionCompleted {
+            session_id: SID,
+            actual_min: 25,
+        }
+        .into()],
+    );
+    assert_eq!(t.sessions[0].status, SessionStatus::Completed);
+
+    // Рестарт на день 3: день не был закрыт — стрик сгорает событием
+    // (тот же путь, что и полночный тик), затем день открывается чистым.
+    let day3 = ts_at(2026, 10, 29, 9, 30);
+    let events = t.tick_day_rollover(day3);
+    assert_eq!(events.len(), 1, "стрик дня 2 сгорает событием DayClosed");
+    apply(&mut t, day3, events);
+    assert!(t.sessions.is_empty());
+    assert!(!t.day_closed, "новый день можно закрыть кнопкой");
+    assert_eq!(t.current_date, day3.date_naive());
+    assert!(
+        t.op_start_focus(day3, None, false, None, false, None, None)
+            .is_ok(),
+        "новый день не спрашивает о разрыве от этапа дня 2"
+    );
+}
+
+/// Рестарт в тот же день (v0.3.1): реилей и ролловер после него дневные
+/// данные не трогают — защита от убийства процесса работает как раньше.
+#[test]
+fn same_day_restart_preserves_day() {
+    let mut t = timer();
+    t.begin_replay();
+    let base = Local::now();
+    let events = t
+        .op_start_focus(base, None, false, None, false, None, None)
+        .unwrap();
+    apply_replay(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply_replay(&mut t, done, events);
+    assert_eq!(t.sessions.len(), 1);
+    assert_eq!(t.streak, 1);
+
+    // Ролловер сразу после реилея — тот же день, пустая операция.
+    assert!(
+        t.tick_day_rollover(done + chrono::Duration::minutes(1))
+            .is_empty()
+    );
+    assert_eq!(t.sessions.len(), 1, "сессии сегодняшнего дня сохранились");
+    assert_eq!(t.streak, 1);
 }
 
 /// «Отдохнуть весь банк» (v0.1.1): перерыв длительностью в банк, банк обнулён;

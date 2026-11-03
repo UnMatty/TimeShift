@@ -946,6 +946,26 @@ impl Timer {
     // fold — единственный мутатор состояния
     // -----------------------------------------------------------------------
 
+    /// Переводит таймер в режим восстановления из журнала: `current_date`
+    /// уходит в MIN, и реилей через `fold_replay` сам прокатывает дни журнала,
+    /// сбрасывая дневные данные на каждой границе суток (v0.2.1) и оставляя
+    /// в состоянии только последний день. Без этого данные последнего дня
+    /// журнала при перезапуске складывались в «сегодняшнее» состояние:
+    /// `current_date` уже сегодня, и guard в конце `fold` не срабатывал.
+    pub fn begin_replay(&mut self) {
+        self.current_date = NaiveDate::MIN;
+    }
+
+    /// Шаг реилея: в отличие от `fold` смену суток открывает ДО применения
+    /// записи — guard в конце `fold` применил бы первую запись нового дня
+    /// и тут же стёр её открывшимся днём.
+    pub fn fold_replay(&mut self, record: &WalRecord) {
+        if record.ts.date_naive() > self.current_date {
+            self.open_new_day(record.ts.date_naive());
+        }
+        self.fold(record);
+    }
+
     pub fn fold(&mut self, record: &WalRecord) {
         use Event as E;
         let ts = record.ts;
@@ -1317,6 +1337,9 @@ impl Timer {
         self.sessions = Vec::new();
         self.gaps = Vec::new();
         self.breaks = Vec::new();
+        // Этапов прошлого дня в новом дне нет: первый «Старт» не спрашивает
+        // о разрыве от последней вчерашней помидорки (FR-4).
+        self.last_stage_end = None;
     }
 
     /// События для обнаруженного разрыва (FR-4). Обычный ответ — одна запись

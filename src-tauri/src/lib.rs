@@ -34,7 +34,11 @@ pub fn run() {
 
     // Восстановление состояния дня из журнала: убийство процесса не теряет время.
     let mut timer = Timer::new(config.timer);
-    let wal = Wal::open_default().expect("каталог журнала ~/.timeshift/wal");
+    let mut wal = Wal::open_default().expect("каталог журнала ~/.timeshift/wal");
+    // Реилей прокатывает дни журнала (v0.3.1): без этого дневные данные
+    // последнего дня журнала при перезапуске складывались в «сегодняшнее»
+    // состояние — «Сессии дня» показывали прошлую неделю.
+    timer.begin_replay();
     match wal::read_all(wal.dir()) {
         Ok(playback) => {
             if playback.skipped_lines > 0 || playback.skipped_files > 0 {
@@ -44,7 +48,7 @@ pub fn run() {
                 );
             }
             for record in &playback.events {
-                timer.fold(record);
+                timer.fold_replay(record);
             }
             println!(
                 "timeshift: журнал проигран, событий: {}",
@@ -52,6 +56,15 @@ pub fn run() {
             );
         }
         Err(e) => eprintln!("timeshift: журнал не прочитан ({e}); старт с пустого состояния"),
+    }
+    // После реилея таймер стоит на последнем дне журнала: если он старше
+    // сегодняшнего — открываем новый день тем же путём, что и полночный тик
+    // (незафиксированный банк сгорает событием). Рестарт в тот же день
+    // и пустой журнал — пустые операции.
+    for event in timer.tick_day_rollover(Local::now()) {
+        if let Ok(record) = wal.append(event) {
+            timer.fold(&record);
+        }
     }
 
     tauri::Builder::default()
