@@ -200,8 +200,8 @@ fn restart_restores_running_focus() {
     assert_eq!(second.sessions[0].pauses[0].reason, Some(PauseReason::Away));
 }
 
-/// Банк: скип длинного в короткий накапливает; взятый перерыв потребляет банк;
-/// закрытие дня обнуляет стрик.
+/// Банк: скип длинного в короткий накапливает; взятый перерыв идёт по базе
+/// и банк НЕ тратит (v0.3.3); закрытие дня обнуляет стрик.
 #[test]
 fn skip_bank_accumulates_burns_on_day_close() {
     let base = ts_at(2026, 10, 27, 9, 0);
@@ -234,7 +234,8 @@ fn skip_bank_accumulates_burns_on_day_close() {
     assert_eq!(t.bank_min(), 15);
 
     // Ещё помидорка (через 5 минут — не попадая в порог разрыва);
-    // предложен короткий 5+15=20; берём — банк потреблён.
+    // предложен короткий ровно 5 (банк не прирастается, v0.3.3);
+    // берём — банк остаётся 15.
     now += chrono::Duration::minutes(5);
     let events = t
         .op_start_focus(now, None, false, None, false, None, None)
@@ -245,14 +246,14 @@ fn skip_bank_accumulates_burns_on_day_close() {
     apply(&mut t, now, events);
     let proposed = t.proposed_break().unwrap();
     assert_eq!(proposed.kind, BreakKind::Short);
-    assert_eq!(proposed.duration_min, 20, "5 базовых + 15 из банка");
+    assert_eq!(proposed.duration_min, 5, "база без банка");
     let events = t.op_start_break(now, None, false).unwrap();
     apply(&mut t, now, events);
-    assert_eq!(t.bank_min(), 0);
+    assert_eq!(t.bank_min(), 15, "обычный перерыв банк не тратит");
 
     // Закрытие дня: можно только из Idle; после — стрик обнулён.
     assert!(t.op_close_day().is_err(), "закрывать можно только из Idle");
-    now += chrono::Duration::minutes(20);
+    now += chrono::Duration::minutes(5);
     t.op_end_break(now).expect("закончить перерыв");
     let events = t.op_close_day().unwrap();
     apply(&mut t, now, events);
@@ -979,4 +980,81 @@ fn replay_preserves_consumed_proposal() {
         "после реилея прерванный отдых тоже не предлагается"
     );
     assert_eq!(replayed.streak, 1);
+}
+
+/// Обычный перерыв не тратит банк (v0.3.3): отдых по базе, банк тратится
+/// только явно — «весь банк».
+#[test]
+fn plain_break_keeps_bank() {
+    let mut t = timer();
+    let base = ts_at(2026, 11, 9, 15, 0);
+
+    // Банк 5 из скипнутого короткого.
+    let events = t
+        .op_start_focus(base, None, false, None, false, None, None)
+        .unwrap();
+    apply(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply(&mut t, done, events);
+    let events = t.op_skip_break(BreakAction::SkipToShort).unwrap();
+    apply(&mut t, done, events);
+    assert_eq!(t.bank_min(), 5);
+
+    // Две помидорки с обычными короткими: банк остаётся 5, перерывы по 5.
+    let mut now = done;
+    for _ in 0..2 {
+        let events = t
+            .op_start_focus(now, None, false, None, false, None, None)
+            .unwrap();
+        apply(&mut t, now, events);
+        now += chrono::Duration::minutes(25);
+        let events = t.tick(now);
+        apply(&mut t, now, events);
+        let proposed = t.proposed_break().unwrap();
+        assert_eq!(proposed.duration_min, 5, "предложение — только база");
+        let events = t.op_start_break(now, None, false).unwrap();
+        apply(&mut t, now, events);
+        let Phase::Break(b) = &t.phase else {
+            panic!("должен быть перерыв")
+        };
+        assert_eq!(b.duration_min, 5);
+        now += chrono::Duration::minutes(5);
+        t.op_end_break(now).expect("закончить перерыв");
+    }
+    assert_eq!(t.bank_min(), 5, "банк пережил оба перерыва");
+
+    // «Весь банк» — единственный явный расход: 5 мин, банк обнулён.
+    let events = t.op_start_bank_break(now, None, false).unwrap();
+    apply(&mut t, now, events);
+    let Phase::Break(bp) = &t.phase else {
+        panic!("должен быть перерыв")
+    };
+    assert_eq!(bp.duration_min, 5);
+    assert_eq!(t.bank_min(), 0);
+}
+
+/// Легаси-совместимость (v0.3.3): старая запись WAL — Taken без spend_min —
+/// по-прежнему списывает банк своего вида при реилее (в тот момент перерыв
+/// включал банковские минуты).
+#[test]
+fn legacy_break_event_still_spends_bank() {
+    let mut t = timer();
+    let base = ts_at(2026, 11, 9, 16, 0);
+    t.short_extra_min = 5;
+
+    let legacy = WalRecord {
+        id: Uuid::new_v4(),
+        ts: base,
+        event: Event::BreakEvent(crate::wal::event::BreakEvent {
+            kind: BreakKind::Short,
+            action: BreakAction::Taken,
+            banked_min: 0,
+            duration_min: 10,
+            spend_min: None,
+        }),
+    };
+    t.fold(&legacy);
+    assert_eq!(t.short_extra_min, 0, "легаси-запись списывает банк вида");
+    assert_eq!(t.bank_min(), 0);
 }

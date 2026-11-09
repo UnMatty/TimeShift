@@ -172,10 +172,11 @@ pub fn notify_side_effects(app: &AppHandle, records: &[WalRecord]) {
             Event::BreakEvent(e)
                 if e.action == BreakAction::Taken
                     && e.kind == BreakKind::Long
-                    && e.spend_min.is_none() =>
+                    && e.spend_min.unwrap_or(0) == 0 =>
             {
                 // Долгий перерыв заслуживает настойчивого напоминания
-                // (запись «разрыв = отдых» — не про отдых у экрана).
+                // (запись «разрыв = отдых» со spend_min > 0 — не про отдых
+                // у экрана; Some(0) — обычный перерыв с v0.3.3, None — легаси).
                 notify(
                     app,
                     "☕ Длинный перерыв",

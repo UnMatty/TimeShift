@@ -396,8 +396,8 @@ function PhaseCard({
                 </div>
                 <div className="row skip-row">
                   <span className="muted small">Не отдыхать:</span>
-                  <button onClick={() => void run(() => api.skipBreak("skip_to_short"))}>⏭ в короткий</button>
-                  <button onClick={() => void run(() => api.skipBreak("skip_to_long"))}>⏭ в длинный</button>
+                  <button onClick={() => void run(() => api.skipBreak("skip_to_short"))}>⏭ в банк (короткий)</button>
+                  <button onClick={() => void run(() => api.skipBreak("skip_to_long"))}>⏭ в банк (длинный)</button>
                   <button onClick={() => void run(() => api.skipBreak("skip_plain"))}>⏭ просто скип</button>
                 </div>
               </div>

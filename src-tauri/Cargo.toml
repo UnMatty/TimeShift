@@ -1,6 +1,6 @@
 [package]
 name = "timeshift"
-version = "0.3.2"
+version = "0.3.3"
 description = "TimeShift — помидорка, встроенная в личную экосистему"
 authors = ["matvejunesihin"]
 license = "MIT"

@@ -194,8 +194,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let start_break = item("start_break", "☕ Старт перерыва")?;
     let bank_break = item("bank_break", "🛌 Отдохнуть весь банк")?;
     let end_break = item("end_break", "⏹ Закончить перерыв")?;
-    let skip_short = item("skip_short", "прибавить к следующему короткому")?;
-    let skip_long = item("skip_long", "прибавить к следующему длинному")?;
+    let skip_short = item("skip_short", "скипнуть в банк (короткий)")?;
+    let skip_long = item("skip_long", "скипнуть в банк (длинный)")?;
     let skip_plain = item("skip_plain", "просто пропустить")?;
     let skip = Submenu::with_items(
         app,

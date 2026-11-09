@@ -4794,7 +4794,7 @@ dependencies = [
 
 [[package]]
 name = "timeshift"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "dirs 6.0.0",

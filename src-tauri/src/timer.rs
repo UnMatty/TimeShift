@@ -258,7 +258,9 @@ impl Timer {
         self.short_extra_min + self.long_extra_min
     }
 
-    /// Какой перерыв предлагается после завершённой помидорки (PRD FR-1).
+    /// Какой перерыв предлагается после завершённой помидорки (PRD FR-1):
+    /// ровно базовая длительность — банк к перерыву не добавляется и
+    /// тратится только явно («весь банк», «разрыв = отдых»; v0.3.3).
     /// Взятый или скипнутый перерыв не предлагается повторно (v0.3.2) —
     /// до следующей завершённой помидорки.
     pub fn proposed_break(&self) -> Option<ProposedBreak> {
@@ -271,15 +273,9 @@ impl Timer {
         } else {
             (BreakKind::Short, self.cfg.short_break_min)
         };
-        let extra = match kind {
-            BreakKind::Short => self.short_extra_min,
-            BreakKind::Long => self.long_extra_min,
-            // «Весь банк» не предлагается сам — только по явной команде.
-            BreakKind::Bank => 0,
-        };
         Some(ProposedBreak {
             kind,
-            duration_min: base + extra,
+            duration_min: base,
         })
     }
 
@@ -440,7 +436,9 @@ impl Timer {
         Ok(events)
     }
 
-    /// Старт предложенного перерыва (короткий/длинный по стрику, с банком).
+    /// Старт предложенного перерыва (короткий/длинный по стрику). Банк
+    /// не тратится (v0.3.3): `spend_min: Some(0)` — маркер новой семантики
+    /// (None в старых записях означал «списать банк этого вида»).
     pub fn op_start_break(
         &self,
         now: DateTime<Local>,
@@ -458,19 +456,13 @@ impl Timer {
             kind: BreakKind::Short,
             duration_min: self.cfg.short_break_min,
         });
-        let banked_after = self.bank_min()
-            - match proposed.kind {
-                BreakKind::Short => self.short_extra_min,
-                BreakKind::Long => self.long_extra_min,
-                BreakKind::Bank => self.bank_min(),
-            };
         events.push(
             BreakEvent {
                 kind: proposed.kind,
                 action: BreakAction::Taken,
-                banked_min: banked_after,
+                banked_min: self.bank_min(),
                 duration_min: proposed.duration_min,
-                spend_min: None,
+                spend_min: Some(0),
             }
             .into(),
         );
@@ -1130,15 +1122,16 @@ impl Timer {
                                 self.short_extra_min -=
                                     (spend - from_long).min(self.short_extra_min);
                             }
-                            // Длительность уже включает банк этого вида — банк потреблён.
-                            None => match e.kind {
-                                BreakKind::Short => self.short_extra_min = 0,
-                                BreakKind::Long => self.long_extra_min = 0,
-                                BreakKind::Bank => {
-                                    self.short_extra_min = 0;
-                                    self.long_extra_min = 0;
-                                }
-                            },
+                        // Легаси (до v0.3.3): длительность включала банк этого
+                        // вида — банк потреблён. Новые записи несут Some(0).
+                        None => match e.kind {
+                            BreakKind::Short => self.short_extra_min = 0,
+                            BreakKind::Long => self.long_extra_min = 0,
+                            BreakKind::Bank => {
+                                self.short_extra_min = 0;
+                                self.long_extra_min = 0;
+                            }
+                        },
                         }
                         self.phase = Phase::Break(BreakPhase {
                             kind: e.kind,
