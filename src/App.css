@@ -236,6 +236,25 @@ button.danger {
   margin: 10px 0 2px;
 }
 
+/* Плашка «продолжить» — рестарт последней помидорки из основного окна (v0.3.2). */
+.continue-row {
+  margin: 6px 0 0;
+}
+
+.continue-chip {
+  padding: 4px 12px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--card2);
+  border: 1px dashed var(--accent);
+  border-radius: 14px;
+}
+
+.continue-chip:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
 .skip-row button {
   padding: 3px 9px;
   font-size: 12px;

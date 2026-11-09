@@ -872,3 +872,111 @@ fn plan_lifecycle() {
     assert_eq!(plan.tasks.len(), 1);
     assert_eq!(plan.meetings.len(), 1, "встречи переживают пересборку");
 }
+
+/// Взятый перерыв не предлагается повторно (v0.3.2): после досрочного
+/// прерывания отдыха — снова предложение? Нет: до следующей помидорки — фокус.
+#[test]
+fn taken_break_consumes_proposal_until_next_pomodoro() {
+    let mut t = timer();
+    let base = ts_at(2026, 11, 9, 10, 0);
+
+    let events = t
+        .op_start_focus(base, Some("задача".into()), false, None, false, None, None)
+        .unwrap();
+    apply(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply(&mut t, done, events);
+    assert!(t.proposed_break().is_some(), "после помидорки перерыв предложен");
+
+    // Берём перерыв и прерываем досрочно.
+    let events = t.op_start_break(done, None, false).unwrap();
+    apply(&mut t, done, events);
+    let cut = done + chrono::Duration::minutes(2);
+    t.op_end_break(cut).expect("прервать перерыв");
+    assert!(
+        t.proposed_break().is_none(),
+        "прерванный отдых не предлагается снова"
+    );
+
+    // Старт фокуса проходит без скип-диалога — предложение не висит.
+    let events = t
+        .op_start_focus(cut, None, false, None, false, None, None)
+        .unwrap();
+    apply(&mut t, cut, events);
+    assert!(matches!(t.phase, Phase::Focus(_)));
+
+    // Следующая помидорка снова открывает предложение.
+    let done2 = cut + chrono::Duration::minutes(25);
+    let events = t.tick(done2);
+    apply(&mut t, done2, events);
+    assert!(t.proposed_break().is_some(), "новая помидорка — новое предложение");
+}
+
+/// Скип потребляет предложение ровно один раз (v0.3.2): повторный скип
+/// невозможен, банк не раздувается.
+#[test]
+fn skip_break_consumes_proposal_once() {
+    let mut t = timer();
+    let base = ts_at(2026, 11, 9, 11, 0);
+
+    let events = t
+        .op_start_focus(base, None, false, None, false, None, None)
+        .unwrap();
+    apply(&mut t, base, events);
+    let done = base + chrono::Duration::minutes(25);
+    let events = t.tick(done);
+    apply(&mut t, done, events);
+
+    let events = t.op_skip_break(BreakAction::SkipToShort).unwrap();
+    apply(&mut t, done, events);
+    assert_eq!(t.bank_min(), 5, "база короткого ушла в банк один раз");
+    assert!(t.proposed_break().is_none(), "скипнутый перерыв не предлагается");
+    assert!(
+        t.op_skip_break(BreakAction::SkipPlain).is_err(),
+        "повторный скип — «нет предложенного перерыва»"
+    );
+    assert_eq!(t.bank_min(), 5, "банк не изменился");
+}
+
+/// Флаг потребления восстанавливается из журнала: реилей даёт то же состояние.
+#[test]
+fn replay_preserves_consumed_proposal() {
+    let base = ts_at(2026, 11, 9, 12, 0);
+    let mut live = timer();
+
+    // События вычисляются на живом таймере по шагам (op/tick — чистые,
+    // состояние двигает только apply) и параллельно собираются для реилея.
+    let mut all: Vec<(DateTime<Local>, Vec<Event>)> = Vec::new();
+
+    let events = live
+        .op_start_focus(base, None, false, None, false, None, None)
+        .unwrap();
+    apply(&mut live, base, events.clone());
+    all.push((base, events));
+
+    let done_at = base + chrono::Duration::minutes(25);
+    let events = live.tick(done_at);
+    apply(&mut live, done_at, events.clone());
+    all.push((done_at, events));
+
+    let events = live.op_start_break(done_at, None, false).unwrap();
+    apply(&mut live, done_at, events.clone());
+    all.push((done_at, events));
+
+    let cut_at = done_at + chrono::Duration::minutes(2);
+    live.op_end_break(cut_at).expect("прервать перерыв");
+    assert!(live.proposed_break().is_none());
+
+    let mut replayed = timer();
+    for (ts, events) in &all {
+        apply_replay(&mut replayed, *ts, events.clone());
+    }
+    replayed.op_end_break(cut_at).expect("прервать перерыв");
+
+    assert!(
+        replayed.proposed_break().is_none(),
+        "после реилея прерванный отдых тоже не предлагается"
+    );
+    assert_eq!(replayed.streak, 1);
+}

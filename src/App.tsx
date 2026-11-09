@@ -241,6 +241,10 @@ function SummaryCard({ snap }: { snap: Snapshot }) {
   );
 }
 
+/// Что стартует «Старт фокуса»: свободная подпись и/или задача плана дня
+/// (для задачи label и категорию резолвит команда — FR-13).
+type PendingStart = { label: string | null; taskId: string | null };
+
 function PhaseCard({
   snap,
   run,
@@ -253,21 +257,39 @@ function PhaseCard({
   const [category, setCategory] = useState<Category | null>(null);
   const [pauseReason, setPauseReason] = useState<PauseReason>("internal");
   // Подтверждение «старт фокуса без отдыха», когда перерыв ещё не взят.
-  const [confirmSkip, setConfirmSkip] = useState(false);
+  const [confirmSkip, setConfirmSkip] = useState<PendingStart | null>(null);
 
   const phase = snap.phase;
   const proposed = snap.proposed_break;
   const bank = snap.bank_min;
 
+  // Последняя завершённая помидорка — кандидат «продолжить» из основного
+  // окна (v0.3.2): задача плана (пока не выполнена) или любая подпись.
+  const doneList = snap.sessions.filter(
+    (s) => s.source === "timer" && (s.status === "completed" || s.status === "partial"),
+  );
+  const lastDone = doneList[doneList.length - 1];
+  const lastTask =
+    lastDone?.plan_task_id != null
+      ? snap.plan?.tasks.find((t) => t.id === lastDone.plan_task_id && !t.done)
+      : undefined;
+  const continueStart: PendingStart | null = lastTask
+    ? { label: null, taskId: lastTask.id }
+    : lastDone?.label
+      ? { label: lastDone.label, taskId: null }
+      : null;
+
   const takeBreak = () => void run((gr, asRest) => api.startBreak(gr ?? null, asRest ?? false));
   const takeBankBreak = () => void run((gr, asRest) => api.startBankBreak(gr ?? null, asRest ?? false));
-  const startFocus = () =>
-    void run((gr, asRest) => api.startFocus(label || null, confidential, gr ?? null, asRest ?? false, category));
+  const startFocus = (pending: PendingStart) =>
+    void run((gr, asRest) =>
+      api.startFocus(pending.label, confidential, gr ?? null, asRest ?? false, category, pending.taskId),
+    );
   // Скип предложенного перерыва в банк и сразу старт фокуса.
-  const skipAndStartFocus = () =>
+  const skipAndStartFocus = (pending: PendingStart) =>
     void run(async (gr, asRest) => {
       await api.skipBreak(proposed?.kind === "long" ? "skip_to_long" : "skip_to_short");
-      return api.startFocus(label || null, confidential, gr ?? null, asRest ?? false, category);
+      return api.startFocus(pending.label, confidential, gr ?? null, asRest ?? false, category, pending.taskId);
     });
 
   // Блок «над чем работаешь»: подпись, категория, конфиденциальность, старт.
@@ -300,7 +322,14 @@ function PhaseCard({
       </label>
       <button
         className={primary ? "primary btn-lg" : ""}
-        onClick={() => (proposed ? setConfirmSkip(true) : startFocus())}
+        onClick={() => {
+          const pending: PendingStart = { label: label || null, taskId: null };
+          if (proposed) {
+            setConfirmSkip(pending);
+          } else {
+            startFocus(pending);
+          }
+        }}
       >
         🍅 Старт фокуса
       </button>
@@ -318,18 +347,25 @@ function PhaseCard({
               мин и сгорит при закрытии дня.
             </p>
             <div className="row">
-              <button className="primary" onClick={skipAndStartFocus}>
+              <button
+                className="primary"
+                onClick={() => {
+                  const pending = confirmSkip;
+                  setConfirmSkip(null);
+                  skipAndStartFocus(pending);
+                }}
+              >
                 ⏭ Скипнуть в банк и начать фокус
               </button>
               <button
                 onClick={() => {
-                  setConfirmSkip(false);
+                  setConfirmSkip(null);
                   takeBreak();
                 }}
               >
                 ☕ Всё-таки отдохнуть
               </button>
-              <button onClick={() => setConfirmSkip(false)}>Отмена</button>
+              <button onClick={() => setConfirmSkip(null)}>Отмена</button>
             </div>
           </div>
         </div>
@@ -373,6 +409,17 @@ function PhaseCard({
                   </button>
                 </div>
               )
+            )}
+
+            {continueStart && (
+              <div className="row continue-row">
+                <button
+                  className="continue-chip"
+                  onClick={() => (proposed ? setConfirmSkip(continueStart) : startFocus(continueStart))}
+                >
+                  ▸ 🍅 продолжить: «{lastTask ? lastTask.title : continueStart.label}»
+                </button>
+              </div>
             )}
 
             {focusStart(!proposed)}

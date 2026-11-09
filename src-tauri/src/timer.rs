@@ -216,6 +216,9 @@ pub struct Timer {
     pub short_extra_min: i64,
     pub long_extra_min: i64,
     pub streak: u32,
+    /// Предложенный перерыв уже взят/скипнут — не предлагаем снова до следующей
+    /// помидорки (v0.3.2). Восстанавливается из BreakEvent/SessionCompleted.
+    pub break_consumed: bool,
     pub last_stage_end: Option<DateTime<Local>>,
     pub current_date: NaiveDate,
     /// День закрыт кнопкой «Завершить день» (до полуночи повторно не закрывается).
@@ -238,6 +241,7 @@ impl Timer {
             short_extra_min: 0,
             long_extra_min: 0,
             streak: 0,
+            break_consumed: false,
             last_stage_end: None,
             current_date: Local::now().date_naive(),
             day_closed: false,
@@ -255,8 +259,10 @@ impl Timer {
     }
 
     /// Какой перерыв предлагается после завершённой помидорки (PRD FR-1).
+    /// Взятый или скипнутый перерыв не предлагается повторно (v0.3.2) —
+    /// до следующей завершённой помидорки.
     pub fn proposed_break(&self) -> Option<ProposedBreak> {
-        if !matches!(self.phase, Phase::Idle) || self.streak == 0 {
+        if !matches!(self.phase, Phase::Idle) || self.streak == 0 || self.break_consumed {
             return None;
         }
         let long = self.streak.is_multiple_of(self.cfg.long_every);
@@ -1060,6 +1066,7 @@ impl Timer {
                 self.phase = Phase::Idle;
                 self.last_stage_end = Some(ts);
                 self.streak += 1;
+                self.break_consumed = false;
             }
             E::SessionVoided(e) => {
                 if let Phase::Focus(f) = &mut self.phase
@@ -1104,6 +1111,9 @@ impl Timer {
                 }
             }
             E::BreakEvent(e) => {
+                // Любое решение по предложенному перерыву (взят, скипнут,
+                // «разрыв = отдых») потребляет его — повторно не предлагаем.
+                self.break_consumed = true;
                 let offered_base = match e.kind {
                     BreakKind::Short => self.cfg.short_break_min,
                     BreakKind::Long => self.cfg.long_break_min,
@@ -1333,6 +1343,7 @@ impl Timer {
         self.current_date = today;
         self.day_closed = false;
         self.burned_bank_min = 0;
+        self.break_consumed = false;
         self.plan = None;
         self.sessions = Vec::new();
         self.gaps = Vec::new();
